@@ -32,6 +32,55 @@
     multiply and return the full 64 bit result
 -------------------------------------------------*/
 
+#ifdef PORTANDROID
+
+#ifndef __x86_64__
+#define mul_32x32 _mul_32x32
+INLINE INT64 ATTR_CONST ATTR_FORCE_INLINE
+_mul_32x32(INT32 a, INT32 b)
+{
+	register INT64 result;
+
+	__asm__ (
+		" imull  %[b] ;"
+		: [result] "=A" (result)	/* result in edx:eax */
+		: [a]      "%a"  (a)		/* 'a' should also be in eax on entry */
+		, [b]      "rm"  (b)		/* 'b' can be memory or register */
+		: "cc"						/* Clobbers condition codes */
+	);
+
+	return result;
+}
+#endif
+
+
+/*-------------------------------------------------
+    mulu_32x32 - perform an unsigned 32 bit x
+    32 bit multiply and return the full 64 bit
+    result
+-------------------------------------------------*/
+
+#ifndef __x86_64__
+#define mulu_32x32 _mulu_32x32
+INLINE UINT64 ATTR_CONST ATTR_FORCE_INLINE
+_mulu_32x32(UINT32 a, UINT32 b)
+{
+	register UINT64 result;
+
+	__asm__ (
+		" mull  %[b] ;"
+		: [result] "=A" (result)	/* result in edx:eax */
+		: [a]      "%a"  (a)		/* 'a' should also be in eax on entry */
+		, [b]      "rm"  (b)		/* 'b' can be memory or register */
+		: "cc"						/* Clobbers condition codes */
+	);
+
+	return result;
+}
+#endif
+
+#else
+
 #ifndef __x86_64__
 #define mul_32x32 _mul_32x32
 INLINE INT64 ATTR_CONST ATTR_FORCE_INLINE
@@ -77,6 +126,7 @@ _mulu_32x32(UINT32 a, UINT32 b)
 }
 #endif
 
+#endif
 
 /*-------------------------------------------------
     mul_32x32_hi - perform a signed 32 bit x 32 bit
