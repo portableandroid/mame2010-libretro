@@ -63,10 +63,15 @@ typedef enum _state_save_error state_save_error;
 #define STATE_PRESAVE(name) void name(running_machine *machine, void *param)
 #define STATE_POSTLOAD(name) void name(running_machine *machine, void *param)
 
-
+#ifdef PORTANDROID
+#define IS_VALID_SAVE_TYPE(_var) \
+	(DEF_NAMESPACE::is_arithmetic<__typeof__(_var)>::value || DEF_NAMESPACE::is_enum<__typeof__(_var)>::value || \
+	 DEF_NAMESPACE::is_same<__typeof__(_var), PAIR>::value || DEF_NAMESPACE::is_same<__typeof__(_var), PAIR64>::value)
+#else
 #define IS_VALID_SAVE_TYPE(_var) \
 	(DEF_NAMESPACE::is_arithmetic<typeof(_var)>::value || DEF_NAMESPACE::is_enum<typeof(_var)>::value || \
 	 DEF_NAMESPACE::is_same<typeof(_var), PAIR>::value || DEF_NAMESPACE::is_same<typeof(_var), PAIR64>::value)
+#endif
 
 /* generic registration; all further registrations are based on this */
 #define state_save_register_generic(_mach, _mod, _tag, _index, _name, _val, _valsize, _count)		\
