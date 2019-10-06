@@ -49,6 +49,7 @@
 #include "crsshair.h"
 
 #include "lh/snap.lh"
+
 #ifdef PORTANDROID
 #include "emu_init.h"
 #endif
