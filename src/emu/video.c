@@ -49,7 +49,9 @@
 #include "crsshair.h"
 
 #include "lh/snap.lh"
-
+#ifdef PORTANDROID
+#include "emu_init.h"
+#endif
 
 
 /***************************************************************************
@@ -921,6 +923,10 @@ static osd_ticks_t throttle_until_ticks(running_machine *machine, osd_ticks_t ta
 
 static void update_frameskip(running_machine *machine)
 {
+#ifdef PORTANDROID
+	global.skipping_this_frame = cb_context.video_skip;
+	global.frameskip_counter = 0;
+#else
 	/* if we're throttling and autoframeskip is on, adjust */
 	if (effective_throttle(machine) && effective_autoframeskip(machine) && global.frameskip_counter == 0)
 	{
@@ -962,6 +968,9 @@ static void update_frameskip(running_machine *machine)
 	/* increment the frameskip counter and determine if we will skip the next frame */
 	global.frameskip_counter = (global.frameskip_counter + 1) % FRAMESKIP_LEVELS;
 	global.skipping_this_frame = skiptable[effective_frameskip()][global.frameskip_counter];
+
+#endif
+
 }
 
 
