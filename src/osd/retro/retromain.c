@@ -195,7 +195,9 @@ void retro_init (void)
     path_mkdir(fontpath);
     snprintf(crosshairpath, sizeof(crosshairpath), "%s%s%s", libretro_system_directory, path_default_slash(), "crosshairs");
     path_mkdir(crosshairpath);
-
+#ifdef PORTANDROID
+    snprintf(cheatpath, sizeof(cheatpath), "%s%s%s", libretro_system_directory, path_default_slash(), "cheat");
+#endif
     // user-generated content loaded from mame2010 subfolder within the libretro save folder
     snprintf(ctrlrpath, sizeof(ctrlrpath), "%s%s%s", libretro_save_directory, path_default_slash(), "ctrlr");
     path_mkdir(ctrlrpath);
