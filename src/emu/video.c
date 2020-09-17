@@ -439,7 +439,11 @@ void video_frame_update(running_machine *machine, int debug)
 		/* if none of the screens changed and we haven't skipped too many frames in a row,
            mark this frame as skipped to prevent throttling; this helps for games that
            don't update their screen at the monitor refresh rate */
+#ifdef PORTANDROID
+		if (cb_settings.frame_skip_disable && !anything_changed && !global.auto_frameskip && global.frameskip_level == 0 && global.empty_skip_count++ < 3)
+#else
 		if (!anything_changed && !global.auto_frameskip && global.frameskip_level == 0 && global.empty_skip_count++ < 3)
+#endif
 			skipped_it = TRUE;
 		else
 			global.empty_skip_count = 0;
@@ -964,6 +968,7 @@ static void update_frameskip(running_machine *machine)
 #ifdef PORTANDROID
 	if(cb_settings.frame_skip_direct && !cb_settings.frame_skip_disable) {
 		global.frameskip_counter = 0;
+		global.frameskip_level = 0;
 		global.skipping_this_frame = cb_context.video_skip;
 		return;
 	}
