@@ -50,6 +50,11 @@
 
 #include "lh/snap.lh"
 
+#ifdef PORTANDROID
+#define DEBUG_LEVEL 0
+#include "emu_retro.h"
+#endif
+
 /***************************************************************************
     DEBUGGING
 ***************************************************************************/
@@ -956,7 +961,13 @@ static void update_frameskip(running_machine *machine)
 			}
 		}
 	}
-
+#ifdef PORTANDROID
+	if(cb_settings.frame_skip_direct && !cb_settings.frame_skip_disable) {
+		global.frameskip_counter = 0;
+		global.skipping_this_frame = cb_context.video_skip;
+		return;
+	}
+#endif
 	/* increment the frameskip counter and determine if we will skip the next frame */
 	global.frameskip_counter = (global.frameskip_counter + 1) % FRAMESKIP_LEVELS;
 	global.skipping_this_frame = skiptable[effective_frameskip()][global.frameskip_counter];
