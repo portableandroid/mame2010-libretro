@@ -21,7 +21,7 @@
 
 #ifdef PORTANDROID
 #define DEBUG_LEVEL 0
-#include "emu_retro.h"
+//#include "emu_retro.h"
 #define LOG(x)	//printf_2 x
 
 #else
@@ -674,7 +674,7 @@ static int open_rom_file(rom_load_data *romdata, const char *regiontag, const ro
 		{
 			astring fname(drv->name, PATH_SEPARATOR, ROM_GETNAME(romp));
 			#ifdef PORTANDROID
-			printf_2("open drv 1: %s", fname.cstr());
+			//printf_2("open drv 1: %s", fname.cstr());
 			if (has_crc){
 				filerr = mame_fopen_crc(libretro_content_directory, fname, crc, OPEN_FLAG_READ, &romdata->file);
 				if(filerr != FILERR_NONE) {
@@ -699,7 +699,7 @@ static int open_rom_file(rom_load_data *romdata, const char *regiontag, const ro
 	{
 		astring fname(regiontag, PATH_SEPARATOR, ROM_GETNAME(romp));
 		#ifdef PORTANDROID
-		printf_2("open drv 2: %s", fname.cstr());
+		//printf_2("open drv 2: %s", fname.cstr());
 		if (has_crc){
 			filerr = mame_fopen_crc(libretro_content_directory, fname, crc, OPEN_FLAG_READ, &romdata->file);
 			if(filerr != FILERR_NONE) {
