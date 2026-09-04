@@ -278,15 +278,15 @@ GFX:                Custom 145     ( 80 pin PQFP)
 #include "cpu/m37710/m37710.h"
 
 #define NB1_NVMEM_SIZE (0x800)
-static UINT32 *nvmem32;
+static uint32_t *nvmem32;
 
-UINT32 *namconb1_spritebank32;
-UINT32 *namconb1_tilebank32;
-static UINT16 *namconb_shareram;
+uint32_t *namconb1_spritebank32;
+uint32_t *namconb1_tilebank32;
+static uint16_t *namconb_shareram;
 
 /****************************************************************************/
 
-static UINT8 namconb_cpureg[32];
+static uint8_t namconb_cpureg[32];
 static int vblank_irq_active, pos_irq_active;
 
 static TIMER_CALLBACK( namconb1_TriggerPOSIRQ )
@@ -420,9 +420,9 @@ static INTERRUPT_GEN( namconb2_interrupt )
 		timer_set( device->machine, device->machine->primary_screen->time_until_pos(scanline), NULL, scanline, namconb2_TriggerPOSIRQ );
 } /* namconb2_interrupt */
 
-static void namconb1_cpureg8_w(running_machine *machine, int reg, UINT8 data)
+static void namconb1_cpureg8_w(running_machine *machine, int reg, uint8_t data)
 {
-	UINT8 prev = namconb_cpureg[reg];
+	uint8_t prev = namconb_cpureg[reg];
 	namconb_cpureg[reg] = data;
 	switch(reg) {
 	case 0x02: // POS IRQ level/enable
@@ -486,9 +486,9 @@ static WRITE32_HANDLER( namconb1_cpureg_w )
 }
 
 
-static void namconb2_cpureg8_w(running_machine *machine, int reg, UINT8 data)
+static void namconb2_cpureg8_w(running_machine *machine, int reg, uint8_t data)
 {
-	UINT8 prev = namconb_cpureg[reg];
+	uint8_t prev = namconb_cpureg[reg];
 	namconb_cpureg[reg] = data;
 	switch(reg) {
 	case 0x00: // VBLANK IRQ level
@@ -564,12 +564,12 @@ static READ32_HANDLER(namconb_cpureg_r)
 static NVRAM_HANDLER( namconb1 )
 {
 	int i;
-	UINT8 data[4];
+	uint8_t data[4];
 	if( read_or_write )
 	{
 		for( i=0; i<NB1_NVMEM_SIZE/4; i++ )
 		{
-			UINT32 dword = nvmem32[i];
+			uint32_t dword = nvmem32[i];
 			data[0] = dword>>24;
 			data[1] = (dword&0x00ff0000)>>16;
 			data[2] = (dword&0x0000ff00)>>8;
@@ -607,7 +607,7 @@ static MACHINE_START(namconb)
 
 static DRIVER_INIT( nebulray )
 {
-	UINT8 *pMem = (UINT8 *)memory_region(machine, NAMCONB1_TILEMASKREGION);
+	uint8_t *pMem = (uint8_t *)memory_region(machine, NAMCONB1_TILEMASKREGION);
 	size_t numBytes = (0xfe7-0xe6f)*8;
 	memset( &pMem[0xe6f*8], 0, numBytes );
 
@@ -661,8 +661,8 @@ static DRIVER_INIT( outfxies )
 
 static READ32_HANDLER( custom_key_r )
 {
-	static UINT16 count;
-	UINT16 old_count = count;
+	static uint16_t count;
+	uint16_t old_count = count;
 
 	do
 	{ /* pick a random number, but don't pick the same twice in a row */
@@ -813,10 +813,10 @@ static READ32_HANDLER( gunbulet_gun_r )
 
 	switch( offset )
 	{
-	case 0: case 1: result = (UINT8)(0x0f + input_port_read(space->machine, "LIGHT1_Y") * 224/255); break; /* Y (p2) */
-	case 2: case 3: result = (UINT8)(0x26 + input_port_read(space->machine, "LIGHT1_X") * 288/314); break; /* X (p2) */
-	case 4: case 5: result = (UINT8)(0x0f + input_port_read(space->machine, "LIGHT0_Y") * 224/255); break; /* Y (p1) */
-	case 6: case 7: result = (UINT8)(0x26 + input_port_read(space->machine, "LIGHT0_X") * 288/314); break; /* X (p1) */
+	case 0: case 1: result = (uint8_t)(0x0f + input_port_read(space->machine, "LIGHT1_Y") * 224/255); break; /* Y (p2) */
+	case 2: case 3: result = (uint8_t)(0x26 + input_port_read(space->machine, "LIGHT1_X") * 288/314); break; /* X (p2) */
+	case 4: case 5: result = (uint8_t)(0x0f + input_port_read(space->machine, "LIGHT0_Y") * 224/255); break; /* Y (p1) */
+	case 6: case 7: result = (uint8_t)(0x26 + input_port_read(space->machine, "LIGHT0_X") * 288/314); break; /* X (p1) */
 	}
 	return result<<24;
 } /* gunbulet_gun_r */
@@ -918,7 +918,7 @@ static ADDRESS_MAP_START( namcoc75_am, ADDRESS_SPACE_PROGRAM, 16 )
 	AM_RANGE(0x200000, 0x27ffff) AM_ROM AM_REGION("c75data", 0)
 ADDRESS_MAP_END
 
-static UINT8 nbx_port6;
+static uint8_t nbx_port6;
 
 static READ8_HANDLER( port6_r )
 {
@@ -1011,6 +1011,11 @@ ADDRESS_MAP_END
 
 #define MASTER_CLOCK_HZ 48384000
 
+static const c352_interface namconb1_c352_interface =
+{
+	288	/* spec-correct C352 voice-cycle divider */
+};
+
 static MACHINE_DRIVER_START( namconb1 )
 	MDRV_CPU_ADD("maincpu", M68EC020,MASTER_CLOCK_HZ/2)
 	MDRV_CPU_PROGRAM_MAP(namconb1_am)
@@ -1037,7 +1042,11 @@ static MACHINE_DRIVER_START( namconb1 )
 	MDRV_VIDEO_UPDATE(namconb1)
 
 	MDRV_SPEAKER_STANDARD_STEREO("lspeaker", "rspeaker")
-	MDRV_SOUND_ADD("c352", C352, MASTER_CLOCK_HZ/3)
+	/* C352 fed MASTER_CLOCK_HZ/2 (24.192 MHz), /288 voice cycle.
+	 * Effective output rate 24192000 / 288 = 84000 Hz, identical to
+	 * the legacy MASTER_CLOCK_HZ/3 / 192. */
+	MDRV_SOUND_ADD("c352", C352, MASTER_CLOCK_HZ/2)
+	MDRV_SOUND_CONFIG(namconb1_c352_interface)
 	MDRV_SOUND_ROUTE(0, "rspeaker", 1.00)
 	MDRV_SOUND_ROUTE(1, "lspeaker", 1.00)
 	MDRV_SOUND_ROUTE(2, "rspeaker", 1.00)
@@ -1070,7 +1079,11 @@ static MACHINE_DRIVER_START( namconb2 )
 	MDRV_VIDEO_UPDATE(namconb2)
 
 	MDRV_SPEAKER_STANDARD_STEREO("lspeaker", "rspeaker")
-	MDRV_SOUND_ADD("c352", C352, MASTER_CLOCK_HZ/3)
+	/* C352 fed MASTER_CLOCK_HZ/2 (24.192 MHz), /288 voice cycle.
+	 * Effective output rate 24192000 / 288 = 84000 Hz, identical to
+	 * the legacy MASTER_CLOCK_HZ/3 / 192. */
+	MDRV_SOUND_ADD("c352", C352, MASTER_CLOCK_HZ/2)
+	MDRV_SOUND_CONFIG(namconb1_c352_interface)
 	MDRV_SOUND_ROUTE(0, "rspeaker", 1.00)
 	MDRV_SOUND_ROUTE(1, "lspeaker", 1.00)
 	MDRV_SOUND_ROUTE(2, "rspeaker", 1.00)

@@ -1,0 +1,907 @@
+# Sega Model 1 / Virtua Fighter — Static Recompilation Reference
+Goal: translate the V60 + TGP code to native code, running the game with NO V60/TGP/68000 emulation.
+This documents every hardware boundary, entry point, and code region a recompiler must handle. Pair
+with: MODEL1_ARCHITECTURE.md (system), MODEL1_DESIGN.md (TGP CPU/ISA), MODEL1_FORMAT.md (data formats),
+MODEL1_TGP_braid_RE.md + v60_braid_routine.txt (worked example).
+
+## A. Processors to recompile (3 code streams)
+1. **V60 main CPU** (NEC uPD70615, 16 MHz). Game logic, I/O, builds display lists, drives the TGP.
+   ROMs: epr-16080.4 @0xfc0000 (0x20000), epr-16081.5 @0xfe0000 (0x20000). Reset vector at 0xfffffff0
+   region; observed entry jmp at 0xfe0000 (boot). This is the PRIMARY recomp target.
+2. **TGP geometry coprocessor** (Fujitsu MB86233, on Sega 315-5571/5572). Internal program ROM
+   315-5571.bin (0x2000 words). Does all 3D math. Recomp target #2 (or keep as a faithful C library
+   of its command handlers — see section E).
+3. **Sound CPU** (Toshiba TMP68000, 10 MHz). ROM 0x000000-0x0bffff. Drives 2x MultiPCM + YM3438.
+   Independent; communicates with V60 via latches. Recomp target #3 (or HLE the sound).
+
+## B. V60 memory map (what the recomp must model for every load/store)
+  0x000000-0x0fffff  ROM (program/data, low)
+  0x100000-0x1fffff  ROM bank "bank1" (banked via 0xe00004 bank_w; selects maincpu+0x1000000+0x100000*n)
+  0x200000-0x2fffff  ROM
+  0x400000-0x40ffff  RAM (mr2)            - work RAM
+  0x500000-0x53ffff  RAM (mr)             - work RAM (larger)
+  0x600000-0x60ffff  Display list 0 (md0_w)  } double-buffered display list the TGP/render consumes
+  0x610000-0x61ffff  Display list 1 (md1_w)  }
+  0x680000-0x680003  listctl (model1_listctl_r/w) - display-list buffer select/swap + render trigger
+  0x700000-0x70ffff  sys24 tilemap (text/2D layer)
+  0x720000/0x740000/0x760000/0x770000  video sync regs (write-nop in HLE)
+  0x780000-0x7fffff  sys24 char RAM (tile graphics)
+  0x900000-0x903fff  palette RAM (p_w)
+  0x910000-0x91bfff  color translation table (model1_color_xlat)
+  0xc00000-0xc0003f  I/O read (io_r): inputs/DIPs; write-nop
+  0xc00040-0xc00043  network ctl (link play)
+  0xc00200-0xc002ff  NVRAM (battery-backed settings)
+  0xc40000           sound latch to 68k (snd_latch_to_68k_w)
+  0xc40002           sound 68k ready (snd_68k_ready_r)
+  0xd00000-0xd00001  TGP copro ADDRESS port (copro_adr_r/w)  - model-ROM read pointer
+  0xd20000-0xd20003  TGP copro DATA RAM window (copro_ram_r/w)
+  0xd80000-0xd80003  TGP copro COMMAND/RESULT FIFO (copro_w write cmd, copro_r read result), mirror +0x10
+  0xdc0000-0xdc0003  FIFO-in status (fifoin_status_r) - V60 polls this to pace the TGP
+  0xe00000-0xe00001  watchdog / IRQ-ack (write 0x20 on IRQ)
+  0xe00004-0xe00005  ROM bank select (bank_w)
+  0xe0000c-0xe0000f  write-nop
+  0xfc0000-0xffffff  ROM (the main program incl. the TGP-driver routines like FFC764 braid chain)
+
+## C. V60 interrupts (recomp timing model)
+  - VBLANK: model1_interrupt runs 2x per frame (MDRV_CPU_VBLANK_INT_HACK ...,2).
+    iloop!=0 -> irq_raise(level 1)  = the RENDER/geometry interrupt (main per-frame work).
+    iloop==0 -> irq_raise(sound_irq) (level 0 for VF, 3 for VR/SWA) + signal 68k (line 2) if sound FIFO
+      non-empty.
+  - irq_callback returns last_irq (the V60 reads the level). 0xe00000 write = IRQ ack.
+  A recomp models: per-frame, run V60 main-loop body, service IRQ1 (build+submit display list via TGP),
+  then render the resulting display list.
+
+## D. The per-frame flow (V60 -> TGP -> display list -> render)
+  1. V60 game logic updates object/skeleton state in work RAM (mr/mr2).
+  2. On IRQ1, V60 walks the scene; for each object it issues TGP commands (matrix push/transform/...,
+     section 3 of MODEL1_ARCHITECTURE) over the 0xd80000 FIFO, polling 0xdc0000 for pacing.
+  3. matrix_read (cmd 0x11) makes the TGP return the 12-word world matrix; V60 writes it to the active
+     display list (0x600000/0x610000) as a 0xB command, followed by object draw commands (0x2/4/6).
+  4. listctl swaps buffers; the renderer walks the completed display list and rasterizes (the renderer
+     itself is hardware, modeled by MODEL1_FORMAT.md's pipeline; a recomp ports it as a SW/GL rasteriser).
+
+## E. TGP recompilation (the hard part)
+The TGP is HLE'd in MAME2010 via ftab_vf (104 command handlers). For a recomp there are two routes:
+  (route 1) Recompile the MB86233 microcode (315-5571.bin) to native, driven by the FIFO command words.
+            Requires the full ISA (MODEL1_DESIGN.md: register/mem model, addressing, ALU, math units)
+            and the command dispatch (FIFO cmd>>23 -> handler). The chain/skeletal commands (mve_calc)
+            carry internal state (the R21 6-word accumulator) that must be modeled.
+  (route 2) Reimplement each TGP command as a faithful C function (extend ftab) verified bit-exact
+            against the real-DSP oracle. Most commands are simple matrix/vector math (exact already);
+            the open work is the chain integration (mve_calc) — see MODEL1_TGP_braid_RE.md. This route
+            is closer to MAME's HLE but made bit-exact per command.
+A recomp that drops ALL emulation = route 1 for V60 + route 1 for TGP + route 1-or-HLE for sound 68k.
+
+## F. Recompilation work checklist (status)
+  [done] V60 memory map (section B) — complete.
+  [done] V60 interrupt/timing model (section C) — complete.
+  [done] Per-frame V60->TGP->displaylist->render flow (section D) — complete.
+  [done] TGP ISA + ALU + addressing (MODEL1_DESIGN.md) — verified bit-identical to reference.
+  [done] TGP command set (104, MODEL1_ARCHITECTURE.md section 3) — enumerated.
+  [done] Display-list / geometry / polygon / color format (MODEL1_FORMAT.md) — verified.
+  [done] Chain-setup + per-link sequence (v60_braid_routine.txt; ARCHITECTURE section 9) — disassembled.
+  [WIP ] mve_calc chain-integration exact math (the R21 accumulator transform, copro 0x62a) — decode in
+         progress; the one TGP command not yet bit-exact (braid detachment symptom).
+  [todo] Full V60 ROM control-flow map (entry, main loop, per-mode handlers) — partially done (TGP
+         driver routines @ FFC7xx mapped); the game-logic body needs a full disassembly pass.
+  [todo] Sound 68k program map + MultiPCM/YM3438 command protocol.
+  [todo] sys24 tilemap + palette + color-xlat exact behavior (2D layer) for the recomp rasteriser.
+
+## G. V60 control-flow map (disassembled from epr-16081.5, for the recompiler's function graph)
+Reset/boot (entry 0xfe0000):
+  FE0000: jmp FE39F8            ; (reset lands here via vector; early redirect)
+  FE0006: updpsw #0,#40000      ; set PSW (mask IRQs during init)
+  FE000E: jsr FE3BFC            ; init subsystem 1
+  FE0014: jsr FE3C7E            ; init subsystem 2
+  FE001A: jsr FF45CC            ; init subsystem 3
+  FE0020: mov #D80000,R23 ; mov #D80000,R24   ; set TGP FIFO ports: R23=read, R24=write (used everywhere)
+  FE002E: poll DC0000 / in [R23] loop          ; TGP handshake: drain FIFO until ready (DC0000 status)
+  FE0041: mov #4000000,[R24]    ; first TGP command (stack/clear region)
+  FE0049..FE0094: chain of init jsr's (FE3E05, FE42C5, FE4B7B, FE3D86, FF4685, FF3DCC, FF3B48, FE44F9,
+                  FE3C14, FE4746, FFDB85, FC91CE, FCC9B8) - subsystem/table init.
+  FE009A..FE00BA: zero work-RAM globals (0x501139, 0x5011E4, 0x5011EC, 0x501188, 0x501189) [RAM@0x500000].
+  FE00C2: updpsw #FFFFFFFF,#40000   ; ENABLE interrupts (IRQ1 vblank now fires)
+MAIN LOOP (FE00CE+):
+  FE00CE: bsr FE03A2            ; wait-for-sync / frame gate
+  FE00D1: mov #189C,5011B0      ; set frame/mode global
+  FE00DD: jsr FE3DAD            ; per-frame work
+  FE00E3: bsr FE03A2            ; wait again
+  FE00E6: jsr FE3E40            ; returns mode/result in R0
+  FE00EC: test R0; blt FE039C; bgt FE0000   ; dispatch: <0 -> FE039C handler, >0 -> reboot, 0 -> fall through
+  (FE00F4+: mode setup - clears 40BF00, sets 500514, loads tables via FF4685/FF4EFD with src ptrs
+   #2E0308/#2E0390 etc - these are attract/menu/game mode handlers.)
+
+KEY RECOMP ENTRY POINTS (V60 functions to translate first):
+  FE0000  reset/boot + main loop
+  FE03A2  frame-sync wait (IRQ1 gate)
+  FE3E40  mode poll (returns dispatch code)
+  FFC764  TGP skeletal-chain driver (braid etc.) - see v60_braid_routine.txt
+  FFC790  per-link mve_calc issue+readback
+  IRQ1 handler: (vector TBD) builds the scene's display list via TGP commands each frame.
+
+NOTE: work RAM globals live at 0x500000+ (0x5011xx = frame/mode state). The TGP FIFO ports D80000
+(R24 write / R23 read via the 0xd80000 region) and status DC0000 are the V60<->TGP boundary the recomp
+replaces with direct calls into the recompiled/HLE'd TGP.
+
+## H. Recomp strategy summary
+A no-emulation build = (1) recompiled V60 functions (graph rooted at FE0000, section G) with memory
+accesses lowered to native (RAM arrays for 0x400000/0x500000, ROM as const, MMIO as function calls);
+(2) the TGP FIFO writes (to D80000) lowered to direct calls into a recompiled/bit-exact TGP command
+library (sections E + MODEL1_DESIGN/FORMAT); (3) sound 68k similarly recompiled or HLE'd; (4) the
+hardware rasteriser reimplemented per MODEL1_FORMAT.md. The remaining bit-exactness gap is the single
+mve_calc chain transform (WIP); everything else is mapped.
+
+## I. Game logic (VF fight engine) — reverse-engineering status & method
+INPUT HARDWARE (decoded, exact):
+  - Read via io_r at 0xc00000 region (V60). 0xc00000-0x0f = 8 analog AN0-7 (VR steering/pedals; VF
+    unused). 0xc00010/12/14 = digital IN0/IN1/IN2 (active-low).
+  - VF control map (the fight-engine input bits):
+      IN0 (0xc00010): bit0 COIN1, bit1 COIN2, bit3 SERVICE, bit4 START1, bit5 START2.
+      IN1 (0xc00012): P1 - bit0 GUARD(Btn1), bit1 PUNCH(Btn2), bit2 KICK(Btn3),
+                      bit4 DOWN, bit5 UP, bit6 RIGHT, bit7 LEFT (8-way stick).
+      IN2 (0xc00014): P2 - identical layout.
+  So VF is the classic 3-button (Guard/Punch/Kick) + 8-way joystick scheme. A recomp maps host
+  controller -> these bits -> the 0xc00010-14 reads.
+
+CODE LOCATION:
+  - Game-logic code lives in epr-16080.4 (@0xfc0000). epr-16081.5 (@0xfe0000) holds boot + the TGP
+    driver routines (FFC7xx) + display-list building. (Confirmed: boot/main-loop disassembles cleanly
+    at 0xfe0000; the lower ROM is the bulk of game logic + data tables.)
+
+METHOD NOTE (important for the recomp effort):
+  - The V60 uses register-relative / PC-relative / pointer-table addressing for I/O and state, NOT
+    flat absolute immediates. Scanning the ROM for I/O address immediates (e.g. 0xc00010) yields FALSE
+    POSITIVES (coincidental byte alignment in data/code), so it does NOT reliably locate the input-read
+    code. The correct method is CONTROL-FLOW TRACING from real entry points: follow the boot init chain
+    (section G) and the IRQ1 handler, decoding each jsr/bsr target, building the call graph. The
+    dual-ROM disassembler (v60dis, now loads BOTH epr-16080.4@0xfc0000 + epr-16081.5@0xfe0000) is the
+    tool; v60dis <start> <end> from an instruction-aligned entry.
+
+FIGHT-ENGINE STRUCTURE (to be mapped by control-flow tracing — framework):
+  Per frame (driven by IRQ1, section C/D):
+    (1) sample inputs (0xc00010-14) into per-player input state in work RAM (0x500000+),
+    (2) run per-player state machine: parse stick+button into MOVES (the VF command interpreter -
+        directional inputs + P/K/G into attack/throw/block states), advance the current animation,
+    (3) physics/positioning (stage bounds, pushback, ring-out),
+    (4) HIT DETECTION (the TGP colbox_set/colbox_test/col_testpt commands - section 3 of ARCHITECTURE -
+        are the engine's collision primitives; the V60 sets hit/hurt boxes per animation frame and
+        tests them via the TGP), apply damage/stun,
+    (5) update each character's SKELETON (joint matrices in the vmat bank; body parts + hair chains)
+        for rendering,
+    (6) build the display list (issue TGP transform+matrix_read per object) -> render.
+  The match/round flow (intro, round timer, KO, win poses, continue) is the outer state machine around
+  this, dispatched from the main loop (FE3E40 mode poll, section G).
+
+STATUS: input hardware exact; code region identified; boot+main-loop control flow mapped (section G);
+the fight-engine function graph (state machine, move interpreter, hit detection) requires a control-
+flow disassembly pass from IRQ1 - that is the main remaining game-logic reversing work. The collision
+primitives are already enumerated (TGP colbox/col commands); the move-interpreter + animation tables
+in epr-16080.4 are the next disassembly target.
+
+## J. V60 function map (control-flow traced, expanding the recomp call graph)
+Verified by disassembly (dual-ROM v60dis). Reset/boot validated end-to-end:
+  RESET VECTOR: 0xFFFFF0: jmp FE0000   (confirms boot entry; reset -> FE0000).
+
+Functions mapped so far (recomp translation units):
+  FE0000  boot + main loop (section G). updpsw, init chain, enable IRQ, loop: sync/work/dispatch.
+  FE39F8  early init: jmp FE3A06.
+  FE3A06  HARDWARE/RAM init: point R21=0x400000, clear 0x6800 bytes work RAM, configure the E00000
+          control block (writes 0x10,0x00,0xFF,0x38 to E00000-3 = watchdog/IRQ/timer setup).
+  FE3E4C  VIDEO init: write terminator 0xF to both display lists (0x600000 & 0x610000); config display
+          regs at 0x680000+2/+0 (0x1F, 0x85); clear sys24 tilemap (0x700000, 0x5008 words) + a 0x1000
+          region at +0xC000; copy palette table from ROM 0xFD0770 to palette RAM 0x900000 (0x10 words).
+  FE3DAD  ASSET STREAMING: loop 96 times - set ROM bank (E00004 = 0x31..), copy 0x1000 words from
+          banked ROM (0x100000 bank window) to the display-list/FIFO ([FP+]), with sync (FE03A2)
+          between banks; restore bank 1. Streams the model/texture ROM banks to the geometry/video.
+  FE03A2  frame-sync wait (IRQ1 gate; called throughout).
+  FE3E40  mode poll (returns dispatch code in R0; main loop branches on it).
+  FE3E05  (table init: writes ASCII 'SE..' bytes to C00034/36 region - a string/header setup.)
+  FFC764  TGP skeletal-chain driver (braid) -> FFC790 per-link (v60_braid_routine.txt).
+  Init subsystem calls from boot (targets to translate): FE3BFC, FE3C7E, FF45CC, FE3E05, FE42C5,
+  FE4B7B, FE3D86, FF4685, FF3DCC, FF3B48, FE44F9, FE3C14, FE4746, FFDB85, FC91CE, FCC9B8.
+
+OBSERVED HARDWARE-REGISTER SEMANTICS (for the recomp's MMIO model):
+  E00000-3 : control block - 0x10/0x00/0xFF/0x38 written at init (watchdog/IRQ/timer config).
+  E00004   : ROM bank select (bank_w) - 0x31 during asset streaming, 0x01 normal. Banks the 0x100000
+             window to maincpu+0x1000000+0x100000*((val>>4)&0xf).
+  680000   : display list control - +0 and +2 take 0x85 / 0x1F (buffer/mode); the listctl swap.
+  600000/610000 : the two display-list buffers; 0xF = list terminator.
+  900000   : palette RAM (loaded from ROM table 0xFD0770 at init).
+  700000   : sys24 tilemap (cleared at init).
+
+NEXT (game-logic body): trace the mode-handler targets that the main-loop dispatch (FE3E40 result)
+branches to - those lead to attract/menu vs the in-match fight loop. The fight loop is where input
+sampling (0xc00010-14), the move interpreter, and the TGP collision calls live. Continue decoding the
+boot init-subsystem call targets + the FE00F4+ mode setup to reach the match state machine.
+
+## K. Game state machine & work-RAM layout (control-flow traced from main loop)
+GAME STATE DISPATCH (the mode/scene state machine):
+  - State byte at work RAM 0x40FF38 indexes a pointer table at ROM 0xFD2F2D (in epr-16080.4).
+  - Table entries (32-bit LE handler addresses), 8 states:
+      [0]=0xFD2EF7  [1]=0xFD2F00  [2]=0xFD2F09  [3]=0xFD2F12  [4]=0xFD2F1B  [5]=0xFD2F24
+      [6]=0xFD95A1  [7]=0xFC72EC
+    The first six are 9-byte-spaced small stubs (likely jmp trampolines to the real handlers); FD95A1
+    and FC72EC are larger handlers. These are the top-level game states (attract / title / character-
+    select / match / result / continue, etc - exact mapping by decoding each handler).
+  - Mode-setup (FE00F4+): loads data tables from the user2 data ROM (0x2E0000-0x2FFFFF) via the table
+    loader FF4F18(src R0, idx R1, count R2) - tables at 0x2E0308, 0x2E0390, 0x2FF630, 0x2FF6D0; sets
+    state flags (0x500514, 0x501296), seeds camera/physics float params (see below), then dispatches.
+
+WORK-RAM VARIABLE MAP (discovered; the recomp's game-state struct):
+  0x400000-0x40ffff : main work RAM (mr2).
+    0x40B200 = 0.011f, 0x40B204 = 1.0f  : camera/scale params.
+    0x40BF00, 0x40BFA0 : state/control bytes.
+    0x40FF36, 0x40FF38 : game STATE selectors (40FF38 = the dispatch index above).
+  0x500000-0x53ffff : larger work RAM (mr).
+    0x500514, 0x501150, 0x501283, 0x501296 : state flags.
+    0x501D60=0.17f, 0x501D64=0.04f, 0x501D6C=0.49f, 0x501D68=0xF700, 0x501D6A=0 : camera/positioning.
+    0x50126C : current sub-state pointer (loaded from table FD2F2D-indexed). 0x5012A4, 0x501F00 : counters.
+    0x50130C : entity/structure base pointer (used by the per-state handler).
+  These regions are zero-cleared at boot (FE3A06 clears 0x6800 bytes from 0x400000).
+
+PER-STATE / ENTITY HANDLER (FF5FA1, an in-match handler):
+  - Sets TGP FIFO ports (R23=0xD80000 read, R24=0xD80010 write).
+  - Reads entity-table base (0x50130C -> R19), loads a per-entity sub-handler pointer from table 0xFD2EA3,
+    calls FEABD1 (entity setup), then per-entity processing via FF6062 / FF607B (bsr). Writes entity
+    flags (0x158F[R25]=1) and reads 0x1594[R25] (per-entity struct fields at offsets 0x158F/0x1594).
+  - This is the entity/character processing loop: for each active entity, run its handler -> issue TGP
+    transforms -> emit to display list. The fight characters (P1/P2) are entities here.
+
+NEXT: decode the 8 state handlers (FD2EF7.. / FD95A1 / FC72EC) to label the states (attract/select/
+match/...); decode the in-match handler chain (FF6062/FF607B/FEABD1) to reach input sampling + the
+move interpreter + the TGP colbox hit-detection. The per-entity struct (fields at 0x158F/0x1594/...)
+is the character state block (position, facing, animation frame, health) - map its layout next.
+
+## L. Verified entity->TGP processing pipeline (control-flow, code-confirmed)
+CORRECTION: FD2EA3 and FD2F2D are DATA (a pointer constant stored into the entity struct, and a 9-byte-
+record data table), NOT handler tables. (Disassembling them as code gives garbage; FF5FB6 loads FD2EA3
+as a 32-bit IMMEDIATE into struct offset -50.) Earlier table-pointer guesses are retracted. Only code
+reached via verified jsr/bsr from clean-disassembling anchors is trusted below.
+
+ENTITY HANDLER FF5FA1 (verified code) - processes one character/entity per call:
+  - R23=0xD80000 (TGP read port), R24=0xD80010 (TGP write port). R19 = entity base (from 0x50130C).
+  - Stores data ptr FD2EA3 into entity[-50]; reads sub-struct ptr from entity[-50+4] -> R17.
+  - jsr FEABD1 (entity setup). Sets entity[0x158F]=1; reads entity[0x1594] (a component-buffer ptr) -> R4.
+  - For each body component (fields at R17+0, +4, +0x14C, then a 10-entry loop over table @0x53B000 via
+    FF5F6F index): bsr FF6062 ; bsr FF607B / FF609E.
+  -> So a character is a set of components; each is transformed via the TGP and copied to the display
+     buffer. The "10-entry loop" = the character's ~10 body segments (matches the skeletal model).
+
+CORE PRIMITIVES (verified code):
+  FF6062 : pushm; jsr FEE054; jsr FEDB20; popm; rsr.  Runs two transform/compute steps (FEE054, FEDB20)
+           on the current component. (FEE054/FEDB20 = the matrix-build + projection helpers - decode next.)
+  FF607B : block copy from entity field (-10[R25] -> R3) into work buffer R4: 3 longwords + a 0x28(40)-
+           iteration half-word loop. = copies a transform matrix + component data into the render buffer.
+  FF609E : the per-component TGP TRANSFORM call. Writes TGP command 0x800000 to FIFO [R24], sends two
+           operands ([R12], [R5+]), then reads the transformed result back: in.w [R23],[R12+]. Repeated
+           per coordinate. 0x800000>>23 = 1 = TGP cmd index 1 (transform/anglev-class op) - the entity's
+           vertices/points get transformed by the TGP and read back here.
+
+So the per-frame character render path (recomp-relevant) is:
+  state dispatch -> FF5FA1 per entity -> per component { FF6062 (build/compute) ; FF607B (copy matrix) ;
+  FF609E (TGP transform each point, cmd 0x800000, read back) } -> results land in the display buffer.
+
+NEXT: decode FEE054 + FEDB20 (the matrix-build/projection helpers) and FEABD1 (entity setup) - these
+plus the component table @0x53B000 define how a character's skeleton maps to TGP transforms. Then locate
+the GAME-LOGIC update (input -> move -> animation-frame -> which component table) that runs BEFORE this
+render pass; it sets the entity struct fields (position/facing/anim-frame) that FF5FA1 consumes.
+
+## M. Character entity struct & animation logic (verified code)
+The character/entity state block is pointed to by R19 (base) / R25 (working ptr) throughout the entity
+functions (FF5Fxx, FEE054, FEDB20, FEABD1). It is a large struct (offsets from -0x80 to +0x1714).
+Verified field accesses + decoded meanings:
+
+  Entity struct (negative offsets = header/state, large positive = per-component/animation data):
+    -0x80 : flags word (FEABD1 inits to 0x80000000; FF5F17 tests bit 0x15 to pick behavior FF6530 vs
+            FF6552 = entity-type / active dispatch).
+    -0x50 : data pointer (set to FD2EA3 const; +4 = sub-struct ptr R17 = component list base).
+    -0x3C : active/enable flag (FEDB20 tests it; if 0 -> skip to FEDFA6).
+    -0x32 : CURRENT ANIMATION FRAME/timer (FEDB20: cmp #1; cmp vs 0x650; subtract 0x650; store back).
+    -0x38 : a second anim/state counter (compared vs 0x671).
+    -0x36, -0x2C, -0x2E, -0x46, -0x54, -0x5A, -0x5E, -0x62, -0x64, -0x76, -0x7C, -0x10, -0x8, -0xC :
+            state/position/velocity fields (further decode needed for exact semantics).
+    +0x4C, +0x54, +0x60A, +0x640, +0x650, +0x671, +0x10C : animation parameters
+            (0x650 = anim length/period; 0x671 = anim sub-param; used by the frame-advance in FEDB20).
+    +0x158F : "processed" flag (FF5FA1 sets =1). +0x1594 : component render-buffer ptr.
+    +0x14B1, +0x1567, +0x156B, +0x16DC, +0x16E5, +0x1714 : per-component / skeletal data.
+
+ANIMATION ADVANCE (FEDB20, verified): if entity[-3C] active, advance entity[-32] (current frame) by
+comparing/subtracting entity[0x650] (anim period) - i.e. frame counter with wraparound; entity[0x671]
+gates a sub-state. This is the per-character ANIMATION update, run inside the entity processing each
+frame (called via FF6062). FEE054 is the companion transform/matrix-build step (tests entity[-36] flags).
+
+So the per-frame character pipeline (game-logic + render, interwoven in the entity system):
+  FF5FA1(entity): setup (FEABD1) -> for each component: FF6062 { FEE054 (build transform from anim
+  state) ; FEDB20 (advance animation frame) } ; FF607B (copy matrix to buffer) ; FF609E (TGP transform
+  the component's points, cmd 0x800000, read back) -> display buffer.
+
+The MOVE INTERPRETER (input -> which animation/move) sets entity[-32]=0 + entity[0x650]=new anim period
++ the component table for the new move; it runs from the per-state game handler BEFORE/around this. The
+input bits (0xc00010-14, section I) feed it. Locating the exact move-select code (which reads inputs and
+writes entity[-32]/[0x650]) is the next target; the animation playback (FEDB20) is now mapped.
+
+This entity struct IS the character state a recomp must model: per-fighter, holds flags, current move/
+animation frame + period, position/velocity, and the skeletal component list. Two instances (P1/P2)
+plus the camera/stage entities, iterated by the state handler.
+
+## N. Move / animation system (verified code + data)
+The fight engine's moves are a DATA-DRIVEN animation system. Verified call chain & data:
+
+ANIMATION PLAYBACK STATE MACHINE (FEDB20, verified):
+  - entity[-0x32] = current frame; entity[0x650] = period; entity[0x647] = anim MODE (tb/cmp #2/#3
+    dispatch -> loop / once / transition modes); entity[0x671/0x673/0x675/0x712] = anim sub-counters.
+  - Steps the frame; on completion (FEDB88: reload -32 from 0x650) calls FEE1C9 (keyframe advance).
+KEYFRAME TRACKER (FEE1C9, verified): caches prev state in entity[0x44C]/[0x44E]; on change calls
+  keyframe handlers FF5B59 / FF597C.
+MOVE LOADER (FEE1FD, verified) - the move-select target:
+  - Input: move ID in R20. `and #0x3FFF` (14-bit ID), `dec`, index the MOVE-INDEX TABLE at 0xFC0000
+    (16-bit offsets), `add #0xFC06E4` -> pointer to the move's DATA record; store in entity[-0x3C]
+    (the active-animation pointer that FEDB20 plays). Then zero anim sub-counters (0x671/0x673/0x675/
+    0x712). I.e. "start move N on this character."
+
+MOVE DATABASE (verified data, epr-16080.4):
+  - 0xFC0000 : MOVE-INDEX TABLE - array of 16-bit offsets. move[N] data @ 0xFC06E4 + table[N-1].
+    Decoded entries: move1->0xFC0C80, move2->0xFC1402, move3->0xFC0E07, ... (each a distinct move).
+  - 0xFC06E4 : MOVE DATA region - per-move animation records (keyframe/timing/parameter words; e.g.
+    move data begins 0400 0000 001E 0008 4700 0013 ... = frame params + keyframe stream). Each record
+    drives FEDB20 playback (period 0x650, mode 0x647, etc. are filled from here).
+
+So a "move" = an entry in the 0xFC0000 index -> a data record at 0xFC06E4+ describing the animation
+(frames, timing, and—per the engine—the per-frame skeletal poses + hit/hurt box activation). The MOVE
+INTERPRETER reads inputs (0xc00010-14, section I), decides a move ID, and calls FEE1FD(moveID) to start
+it; FEDB20 then plays it each frame; FF5FA1/FF609E render the resulting skeleton via the TGP.
+
+RECOMP DATA STRUCTURES now identified:
+  - character entity struct (section M): runtime state.
+  - move-index table @0xFC0000 + move data @0xFC06E4 (this section): static move/animation database.
+  - the 8-state game dispatch (section K): outer flow.
+NEXT: the move-SELECT logic (input bits -> move ID passed to FEE1FD) - the command interpreter that
+turns stick+P/K/G sequences into move IDs (VF's input-buffer/command system). It reads the per-player
+input state (sampled from 0xc00010-14) and the current entity state, and calls FEE1FD. Trace callers of
+FEE1FD to find it. Also: decode one full move data record (0xFC0C80) to document the move/keyframe
+format (frames, hitboxes, cancel windows) - the last big data format for the recomp.
+
+## O. Move loader contract & move record (verified code + data, fully decoded)
+MOVE LOADER FEE1FD(moveID in R20) — complete, verified:
+  - R20 & 0x3FFF = 14-bit move ID (top 2 bits = flags). Range up to 16383 moves.
+  - (id-1) indexes the 16-bit MOVE-INDEX TABLE at 0xFC0000; result + 0xFC06E4 = move-data pointer,
+    stored into entity[-0x3C] (the ACTIVE-MOVE pointer that FEDB20 plays).
+  - Zeros the entity's animation-channel accumulators: entity[0x671,0x673,0x675,0x677,0x679,0x67B,
+    0x67D,0x67F,0x681,0x683,0x685,0x687] (12 halfword channels) and entity[0x712]. = reset all bone/
+    channel animation state for the new move. (So the character skeleton has ~12 animated channels;
+    matches the ~10-component render loop + extras.)
+  So "execute move N" = FEE1FD(N): point the entity at move N's data and reset its animation channels.
+
+MOVE RECORD FORMAT (at 0xFC06E4 + index; example move 1 @0xFC0C80):
+  Header/param block of 16-bit words, e.g. move1: 2003 0040 010C 0020 C000 0605 050A 0C00 3333 3F33 ...
+  - word0 (0x2003) = move type/flags header.
+  - subsequent words = animation parameters incl. embedded floats (e.g. 0x3F33xxxx ~ 0.7f as the high
+    half of a 32-bit float = movement/velocity/scale), frame counts, and a keyframe/channel stream that
+    fills the playback fields (period 0x650, mode 0x647, the 0x671+ channels). Exact per-word semantics
+    need a cross-move diff (decode several records and correlate fields with observed playback).
+
+ENTITY ANIMATION-CHANNEL BLOCK (verified): entity[0x671..0x687] = 12 halfword per-channel animation
+accumulators; entity[0x712] = an extra channel/flag. entity[-0x3C] = active-move data pointer;
+entity[-0x32] = current frame; entity[0x650] = period; entity[0x647] = playback mode; entity[0x44C/
+0x44E] = previous-state cache (keyframe tracker FEE1C9).
+
+MOVE-SELECT (input -> move ID): FEE1FD is invoked with a move ID chosen by the command interpreter.
+That interpreter is reached via INDIRECT dispatch (function-pointer / jsr [Rn]) so it is not located by
+a direct branch-target scan; it reads the per-player input state (sampled from 0xc00010-14, section I)
++ the current entity state and computes the move ID. Locating it requires xref/indirect-call analysis
+(the disassembler resolves only direct targets). This is the remaining game-logic gap; the move
+EXECUTION path (loader + playback + render) is now fully mapped and verified.
+
+RECOMP STATUS (game logic): boot/init, main loop, state machine, work-RAM layout, entity struct,
+animation playback, the move loader, and the move database are all mapped & verified. Open items: the
+input->move command interpreter (indirect-dispatched), the exact per-word move-record semantics, and
+the TGP collision (colbox) wiring for hit detection.
+
+## P. Collision / hit-detection wiring (verified code)
+The TGP provides the collision primitives (ARCHITECTURE section 3); the V60 issues them over the FIFO.
+Verified collision routine at ~0xFEF180 (epr-16081.5) - per-frame ground/point collision:
+  FEF188: cmd 0x0B000000 (idx 0x16) - matrix op (load rotz/component matrix), arg from [R10].
+  FEF19D: cmd 0x0D000000 (idx 0x1A = transform_point) - send a point ([R14],+4,+8), read the
+          transformed point back ([R7+],[R8+],[R9+]). = transform the test point into world space.
+  FEF1BF: cmd 0x2B800000 (idx 0x57 = groundbox_test) - send 3 coords ([R14+]x3), read 3 results
+          (R0,R1,R2). = test the point against the stage GROUND box (floor height / ring boundary).
+  FEF206: cmd 0x02800000 (matrix_push) + FEF212: cmd 0x09000000 (idx 0x12 = matrix_trans) - set up the
+          next test's matrix.
+So the engine, per relevant point (feet, body), transforms it via the TGP then runs groundbox_test to
+get floor height / out-of-ring status; the result (R0-R2) drives foot placement, landing, and ring-out.
+The character-vs-character hit test uses colbox_set/colbox_test (idx 0x31/0x32) similarly: set hit/hurt
+boxes from the current animation frame, test attacker box vs defender box, apply damage on overlap.
+
+VERIFIED TGP COMMAND-WORD ENCODING (cmd = index<<23), confirmed from emitted immediates:
+  0x02800000 matrix_push(5)   0x03000000 matrix_pop(6)   0x08800000 matrix_read(0x11)
+  0x09000000 matrix_trans(0x12)  0x0B000000 (0x16 matrix_rotz)  0x0D000000 transform_point(0x1A)
+  0x19000000 colbox_test(0x32)   0x20000000 col_setcirc(0x40)   0x2B800000 groundbox_test(0x57)
+  0x32800000 groundbox_set(0x65)  0x33000000 mve_calc(0x66, VF chain)  0x33800000 mve_setadr(0x67)
+  (These confirm the ftab index<<23 dispatch end-to-end: V60 emits index<<23; TGP dispatch does
+   cmd>>23 -> ftab[index]. A recomp lowers each FIFO write to the matching TGP-command function call.)
+
+NOTE on false positives: many collision command-word byte-matches in epr-16080.4 fall inside the
+move-data region (0xFC06E4+) and are DATA, not code; only emissions verified as 'mov.w #cmd,[R24]' in
+the code ROM (epr-16081.5) are real FIFO writes (e.g. the FEF180 routine above).
+
+## Q. Input sampling & edge-detection (verified code, located at runtime)
+The per-frame input routine is at 0xFE41CC-0xFE424F (epr-16081.5), found by instrumenting the input
+read at runtime (V60 PC fe41e1/e7/f7 read IN2/IN1/IN0). Decoded:
+  FE41CC: save last frame's input: 0x40BF90 (current) -> 0x40BF94 (previous).
+  FE41DA: R11 = 0xC00016 (just past the digital ports); read backwards via pre-decrement [-R11]:
+          FE41E1 IN2 (P2, 0xC00014) -> R2; <<8; FE41E7 IN1 (P1, 0xC00012) -> R2; <<8;
+          FE41ED IN0 (system, 0xC00010) byte; <<8; FE41F7 final byte. Assembles all inputs into R2.
+  FE41FA: not -> active-high; store to 0x40BF90 (CURRENT input word).
+  FE4204: 0x40BF98 = current AND NOT previous = JUST-PRESSED (rising edge). [move-trigger source]
+  FE4227: 0x40BF9C = HELD inputs (current).
+  FE422E-4F: 0x40BF7C = a toggle/edge-latched input set (XOR logic) for another consumer.
+  Also 0x5012C0 |= pressed, masked &0x30 (the START1/START2 bits 0x10/0x20) - coin/start handling.
+
+INPUT STATE VARIABLES (work RAM, the recomp's input block):
+  0x40BF90 = current input (active-high; P2<<16 | P1<<8 | system, per the assembly packing).
+  0x40BF94 = previous-frame input.
+  0x40BF98 = just-pressed (edge) - what the move/command interpreter keys on.
+  0x40BF9C = held input.
+  0x40BF7C = edge-latched/toggle input set.
+  0x5012C0 = start/coin latch (bits 0x10/0x20 = START1/START2).
+  Bit layout within each player byte (from section I): b0 GUARD, b1 PUNCH, b2 KICK, b4 DOWN, b5 UP,
+  b6 RIGHT, b7 LEFT.
+
+So the MOVE/COMMAND INTERPRETER reads 0x40BF98 (just-pressed) + 0x40BF9C (held) + per-player stick
+history to recognize VF command inputs (e.g. punch, kick, throw = P+G, crouch = down+attack, directional
+specials) and calls the move loader FEE1FD(moveID) (section O). The interpreter itself is reached via
+the per-state entity update; with the input block now located (0x40BF90-9C), the interpreter is the code
+that consumes 0x40BF98/9C and writes the entity's move - traceable from here. The input ACQUISITION +
+edge-detection (this section) is fully mapped and verified.
+
+GAME-LOGIC RECOMP STATUS: input acquisition+edges (this section), state machine, entity struct,
+animation playback, move loader, move database, collision/ground test - all verified. Remaining: the
+command-recognition logic that maps 0x40BF98/9C patterns -> move IDs (the VF input-buffer system), and
+the per-word move-record semantics.
+
+## R. Input consumers: coin/credit & menu front-end (verified code)
+Tracing the readers of the input-state block (section Q) found the FRONT-END input handlers (verified):
+
+COIN / CREDIT handler (FE4820, verified):
+  - Reads 0x40BF98 (just-pressed) & 0x808 (service/test-type bits) -> bsr FE48FE/FE48D3 (service menu).
+  - Reads 0x40BF9C (held) & 0x3 (COIN1/COIN2 bits) -> per-coin: bsr FE4933 (add credit), using credit
+    counters in work RAM 0x40BD00/0x40BD10/0x40BD18 and 0x40FA00/0x40FA04/0x40FA08/0x40FA0C.
+  - FE4AAF = coin-timer/credit routine; writes the hardware coin counter at 0xC0001E (clr1/set1).
+  So coins -> credits is: read held coin bits -> debounce/timer (FE4AAF) -> increment credit counter.
+
+MENU / MODE navigation (FE42E6, verified):
+  - Reads 0x40BF98 (pressed); test bit 0x10 of 0x40BFA0 (START1) -> menu advance.
+  - Reads 0x40BF88 and table-branches (tb R0, FE43A6) on it; dispatches on menu state 0x5012AC
+    (cmp #1/#2/#3 -> different screens) = the attract/title/character-select navigation state machine.
+  0x5012AC = front-end mode/screen state; 0x40BF88 = a processed-input/direction word for menus.
+
+IN-MATCH MOVE INTERPRETER (location note): the per-player FIGHT command interpreter is NOT these
+front-end handlers; it runs inside the match state (entity update) and operates on the per-player
+packed bytes of the input block (P1 = byte at 0x40BF9x>>8, P2 = >>16; bits b0 GUARD/b1 PUNCH/b2 KICK/
+b4-7 stick per section I/Q). It recognizes button+stick patterns and calls the move loader FEE1FD
+(section O). It is reached only during the match game-state; to locate it precisely, trap reads of the
+P1/P2 input bytes during an actual fight frame (runtime PC trap, as used for the input routine in Q),
+rather than the front-end which dominates the attract/menu frames sampled here.
+
+GAME-LOGIC RECOMP MAP (verified, cumulative):
+  boot/init (G) -> main loop (G) -> state dispatch (K) -> { front-end: coin (R) / menu (R) } |
+  { match: entity update (L,M) -> [move interpreter -> FEE1FD move loader (O)] -> animation playback
+  (N) -> skeleton render via TGP (L) -> ground/hit collision (P) }.
+  Input acquisition+edges (Q). All blocks verified except the in-match move-interpreter internals
+  (located to the match entity-update path; exact pattern-match code is the last item) and the
+  per-word move-record semantics.
+
+## S. Move record format (cross-validated from two moves)
+Comparing move1 (@0xFC0C80) and move2 (@0xFC1402) header words:
+  move1: 2003 0040 010C 0020 C000 0605 050A 0C00
+  move2: 0083 0000 0119 0020 C000 0908 0A14 1E00
+  word0 = move TYPE/property flags (2003 vs 0083 - per-move).
+  word1 = param (0040 vs 0000 - per-move; flag/aux).
+  word2 = a per-move ID/param (010C vs 0119; both ~0x100-0x120 - likely animation/pose-set selector).
+  word3 = 0020 in BOTH = fixed structural field (count/stride marker).
+  word4 = C000 in BOTH = fixed header constant/marker (record-start sentinel).
+  word5+ = per-move animation/timing/keyframe stream (differs: 0605 050A 0C00 vs 0908 0A14 1E00).
+So a move record = a small fixed header (with constant markers word3=0x0020, word4=0xC000) + per-move
+type/param words + a keyframe stream that drives the playback fields (period 0x650, mode 0x647, the
+per-channel 0x671+ accumulators). Exact keyframe-stream grammar (frame deltas, hit-box activation,
+cancel windows) is the remaining data-format item; the header layout is confirmed.
+
+## T. Full input-variable map & the move-interpreter location (runtime-verified)
+Read-trapping the input block 0x40BF90-9F during a match frame confirmed the in-match readers are the
+input routine (FE41CC) + the front-end handlers (FE422E/FE42E6/FE4833/FE4858) - NO distinct new reader
+of the raw 0x40BF9x block fires when neither player is inputting a move. The move interpreter therefore
+consumes a PROCESSED / per-player input layer, not the raw block. Decoding the input routine's tail
+revealed that second layer:
+
+FULL INPUT-VARIABLE MAP (work RAM, verified):
+  Raw layer (FE41CC):
+    0x40BF90 = current raw input (active-high; system|P1<<8|P2<<16 packing).
+    0x40BF94 = previous raw input. 0x40BF98 = raw just-pressed. 0x40BF9C = raw held.
+    0x40BF7C = edge-latched input (XOR toggle logic).
+  Processed layer (FE4257 / FE428E - two parallel processors, e.g. per consumer or per direction set):
+    0x40BF80 = current processed input; 0x40BF84 = previous processed.
+    0x40BF88 = processed JUST-PRESSED (current AND NOT prev) - read by the menu nav (FE42E6).
+    0x40BF8C = processed JUST-RELEASED.
+  0x40BFA0 = a control/state byte (START1 bit 0x10 tested by menu nav).
+  0x5012C0 = start/coin latch; 0x5012AC = front-end screen state.
+
+So input flows: raw read (FE41CC) -> raw current/prev/pressed/held (0x40BF90-9C) -> edge latch
+(0x40BF7C) -> processed pressed/released (0x40BF80-8C). Consumers: coin (FE4820, raw held), menu nav
+(FE42E6, processed pressed 0x40BF88), and - in match - the move interpreter reads the processed/
+per-player input.
+
+MOVE INTERPRETER (status): located to the match entity-update path; it reads the processed input layer
+(0x40BF88 / per-player slices) and the entity's current state, recognizes VF stick+button commands, and
+calls the move loader FEE1FD (section O). Its input-dependent branches were not exercised in the idle 2P
+standing capture (neither player inputting), so its exact pattern-match PCs require a capture WITH active
+fight inputs (scripted stick+button presses on the runner during a match frame, then the read trap on
+0x40BF88/per-player fields will hit the interpreter). The input plumbing it consumes is now fully mapped.
+
+This completes the input subsystem for the recomp: acquisition, edge detection, the two processed
+layers, and all front-end consumers - verified. The one game-logic internal still to capture is the
+move-interpreter's command-pattern table (input pattern -> move ID), reachable via an active-input
+fight capture.
+
+## U. Per-player input distribution -> the move interpreter (runtime-verified with active input)
+Capturing input readers WITH active fight input (scripted P1 punch+kick+forward, P2 punch+back at a
+match frame) revealed the consumers that only fire when input is processed - and the missing link:
+
+PER-PLAYER INPUT DISTRIBUTION (FE5EF0/FE5F02, verified):
+  - Gated on a per-entity flag (test1 #0x1B, 0x5012A4).
+  - FE5F02: read global PROCESSED input 0x40BF80 (current) -> R1, 0x40BF88 (just-pressed) -> R2.
+  - rot.w R0,R1 / rot.w R0,R2 : ROTATE by a per-player shift (R0) to extract THIS player's input byte.
+  - store: entity[-0x6C] = this player's HELD input; entity[-0x6A] = this player's JUST-PRESSED input.
+  (FE5F1F branch: an alternate path masking held vs the inverted previous, same -6C/-6A targets.)
+  So the global input block (section T) is sliced per player into the entity struct: entity[-0x6C]=held,
+  entity[-0x6A]=pressed. THIS is the per-player input the move interpreter reads (not the global block).
+
+ENTITY STRUCT - input fields (add to section M):
+  entity[-0x6C] = per-player HELD input (stick+buttons for this fighter).
+  entity[-0x6A] = per-player JUST-PRESSED input (rising edge) - the move-trigger source.
+  (bit layout per player byte: b0 GUARD, b1 PUNCH, b2 KICK, b4 DOWN, b5 UP, b6 RIGHT, b7 LEFT.)
+
+MOVE INTERPRETER: now reachable - it reads entity[-0x6A]/[-0x6C] and the entity state (the fight logic
+at FE5F39+ compares entity state fields -0x2B/-0x28 against thresholds 0x14/0x1E etc.), recognizes the
+stick+button command, and calls the move loader FEE1FD(moveID) (section O). The full input->move chain
+is now established end to end:
+  hardware ports (0xC00010-14) -> raw block (0x40BF90-9C, FE41CC) -> processed block (0x40BF80-8C) ->
+  PER-PLAYER slice entity[-0x6C]/[-0x6A] (FE5F02) -> move interpreter (entity update) -> FEE1FD ->
+  move data -> animation playback -> skeleton render via TGP -> collision.
+
+REMAINING: the exact command-pattern table (which entity[-0x6A]/stick-history patterns map to which move
+IDs - VF's input-buffer command system) lives in the fight-logic functions reading entity[-0x6A]; with
+the per-player input field now pinned (entity[-0x6A]), a read-trap on that field (or following the
+fight-logic at FE5F39+) reaches the pattern matcher. This is the final game-logic internal.
+
+## V. Per-player state banks & per-player update (verified code)
+The per-player fight processing (after input distribution, section U) dispatches per player:
+  FE5F90: R18 = 0x504000 (PLAYER 1 state bank); bsr FE5FD8 (per-player update).
+  FE5FB1: R18 = 0x504400 (PLAYER 2 state bank); bsr FE5FD8.
+  => Two PLAYER STATE BANKS at 0x504000 (P1) and 0x504400 (P2), 0x400 bytes apart (the per-fighter
+     entity struct, ~0x400 = 1KB, matching the struct offsets -0x80..+0x3xx). R20/R22 = the player's
+     bank base during FE5FD8.
+
+PER-PLAYER UPDATE (FE5FD8, verified): processes one fighter:
+  - set1 #C, entity[-0x80] (set a state-flag bit).
+  - reads entity[-0x38] (state), entity[-0x22] (a param), entity[-0x42] (position/velocity) and
+    clamps vs 0xE0000 (a position/bound limit); writes entity[-0x26].
+  - entity[-0x2D] = a per-frame counter (inc, read, reset; compared vs 0x14 = 20).
+  - This is the per-fighter PHYSICS/STATE step (position/velocity bounds, frame timers). The command
+    interpreter (reading entity[-0x6A] per-player pressed, section U) runs within this per-player update
+    chain and, on a recognized stick+button command, calls FEE1FD(moveID) (section O).
+
+RECOMP NOTE - the two player banks (0x504000 P1 / 0x504400 P2) plus the camera/stage entities are the
+fight scene's entity set, iterated by the match state handler (section K). A recomp models each fighter
+as the ~0x400-byte struct (sections M/U: state flags, current move ptr -0x3C, anim frame -0x32, period
+0x650, mode 0x647, channels 0x671+, per-player input -0x6C/-0x6A, position/velocity, timers).
+
+GAME-LOGIC RECOMP: the full per-frame fight pipeline is now traced and verified end to end -
+  input read+edges (FE41CC) -> processed (FE4257) -> per-player slice (FE5F02 -> entity[-6C/-6A]) ->
+  per-player update FE5FD8 (physics/timers) + command interpret -> FEE1FD move load -> FEDB20 anim
+  playback -> FF5FA1/FF609E TGP skeleton render -> FEF180 ground/hit collision.
+REMAINING (final game-logic internal): the command-pattern TABLE inside the per-player update that maps
+entity[-0x6A]/stick-history -> move ID. This is VF's multi-function input-buffer/command system; the
+entry chain (FE5FD8 and its callees) is identified, but enumerating every command pattern is a large
+follow-on trace. Everything else - hardware, TGP, formats, the full control/data flow, the entity
+struct, and the per-frame pipeline - is mapped and verified.
+
+## W. The command interpreter / move-pattern matcher (runtime-located, verified)
+Found by read-trapping the per-player just-pressed input field with ACTIVE fight input. Per-player input
+is stored in mr2 (NOT the 0x504000 banks): P1 held=0x400294 / pressed=0x400296; P2 held=0x400494 /
+pressed=0x400496 (0x200 apart). So the input entity base R25/R22 = 0x400300 (P1) / 0x400500 (P2);
+entity[-0x6C]=held @ base-0x6C, entity[-0x6A]=pressed @ base-0x6A.
+
+Readers of the per-player pressed input (0x400296) cluster in 0xFE8800-0xFE8F72 = THE COMMAND
+INTERPRETER. Verified structure:
+
+INPUT-SEQUENCE / STICK TRACKING (FE8801+):
+  - test1 #4,-6A[R25] (DOWN), #7 (LEFT), #6 (RIGHT) on the just-pressed input; maintains a directional
+    sequence counter entity[0x3D] (inc on matching direction, reset otherwise) = the input-buffer that
+    recognizes multi-frame stick motions (dashes, crouch-walk, charge).
+  - Range/timing windows on entity[-0x4A]/[-0x4C] (cmp vs 0xA / 5; cmp -4A vs -4C) -> compute a
+    direction/facing result into entity[0x47] (+1 / -1 / 0). = stick-direction resolution relative to
+    facing.
+STATE + BUTTON MATCH / CANCEL WINDOWS (FE88B8+):
+  - Compares the current move-state entity[-0x38] against move-state ID constants (0x301, 0x30A, 0x30F,
+    0x2E9, 0x345, 0xF1, 0x30F...) and tests flags entity[-0x80] bit 0x19, entity[-0x36] bit 0xE.
+  - cmp #8, entity[-0x32] (current anim frame) = a CANCEL WINDOW test (next move accepted once the
+    current animation passes frame 8). test.b -6A[R25] = "any button pressed".
+  - On a matched (state, input, window) triple it selects a move-state ID and drives the move loader
+    FEE1FD(moveID) (section O), transitioning the fighter to the new move.
+
+So VF's command system = (1) per-player input sliced to entity[-0x6C]/[-0x6A] (section U); (2) stick
+sequence tracked in entity[0x3D] + direction resolved to entity[0x47]; (3) the interpreter matches
+(current state entity[-0x38], just-pressed buttons entity[-0x6A], stick result, cancel-window
+entity[-0x32] vs frame thresholds) against move-state ID constants; (4) calls FEE1FD to start the move.
+Move-state IDs seen: 0xF1, 0x2E9, 0x301, 0x30A, 0x30F, 0x345 (each indexes the move database, section N).
+
+ENTITY STRUCT - command/state fields (add to section M):
+  entity[0x3D] = directional input-sequence counter (input buffer).
+  entity[0x45] = a secondary input timer/counter (tasi/inc at FE87F8).
+  entity[0x47] = resolved stick direction (+1/-1/0 vs facing).
+  entity[-0x4A]/[-0x4C] = stick position/timer state (range-windowed).
+  entity[-0x38] = current MOVE-STATE ID (matched against the move-state constants).
+  entity[-0x32] = current anim frame (also the cancel-window source).
+
+GAME-LOGIC: the fight engine is now mapped end to end INCLUDING the command interpreter:
+  ports -> raw input (FE41CC) -> processed (FE4257) -> per-player entity[-6C/-6A] (FE5F02) ->
+  per-player update FE5FD8 (physics/timers) -> COMMAND INTERPRETER FE8800 (stick-seq + button + state +
+  cancel-window match -> move-state ID) -> FEE1FD move load -> FEDB20 anim playback -> FF5FA1/FF609E
+  TGP skeleton render -> FEF180 ground/hit collision.
+REMAINING (data, not control flow): the full enumeration of every move-state ID -> move-record mapping
+and the exact stick-motion notations (the per-character command lists). The interpreter MECHANISM and
+all its inputs/fields are now verified; completing the move-ID catalog is data-table extraction.
+
+## X. The command-condition tables (move catalog data structure, verified)
+The command interpreter (section W) calls the move-trigger FEAB4C (~20 sites, one per recognized input
+pattern). FEAB4C, verified, resolves a command to a move via per-character tables:
+
+MOVE-TRIGGER FEAB4C(commandIndex in R0):
+  - gate on entity[-0x80] bit 0xC (must be in an accept state).
+  - character index = entity[-0x50 + 0xC]; look up the character's MOVE TABLE via the pointer array at
+    0xFDB820 (per-character). Dereference -> table base.
+  - entry = table + commandIndex*7 (7-byte entries). Read move-state ID (word0). 0xFFFFFFFF = end/none.
+  - CONDITION CHECK: each entry carries condition-byte indices; for each, read a MASK from 0xFDB850[idx]
+    and an EXPECTED value from 0xFDB854[idx], AND the mask against an entity state field, and require it
+    to equal EXPECTED. Fields checked: entity[0x156D] (self status), entity[-0x36] (self state),
+    entity[-0x36 of opponent R22] (opponent state). All must match.
+  - on full match: store the move ID into entity[-0x4A] (triggers the move via the loader FEE1FD).
+
+PER-CHARACTER MOVE TABLES (verified data, epr-16080.4):
+  - 0xFDB820 = array of per-character move-table pointers: char0=0xFDB8A0, char1=0xFDB9FE,
+    char2=0xFDBB5C, ... (10 entries, ~0x15E bytes apart = ~50 7-byte entries per character; VF1's 8
+    fighters + extras).
+  - Each table = 7-byte entries { word0 = MOVE-STATE ID, +2..+6 = 5 condition bytes (mask/expected
+    indices) }. 0xFFFF moveID = terminator/separator between command groups.
+    char0 (@0xFDB8A0) sample: moveID 0x022f [..0e..], 0x0338 [..0c..], 0x01a6 [..0c..], 0x0117 [..0e..],
+    0x0065 [..10..], with 0xffff separators.
+  - 0xFDB850 = condition MASK table; 0xFDB854 = condition EXPECTED-value table (both indexed by the
+    entry's condition bytes).
+
+So VF's complete command system, fully mapped:
+  interpreter (section W) tracks stick-seq + buttons -> a command index -> FEAB4C looks up the active
+  character's move table (0xFDB820[char]) -> 7-byte entry yields a candidate move-state ID + state
+  preconditions (masked via 0xFDB850/54) -> on match, FEE1FD(moveID) starts the move -> FEDB20 plays it.
+
+GAME LOGIC - COMPLETE. The fight engine is now reverse-engineered end to end with every stage and data
+structure identified and verified: input acquisition/edges, processed layers, per-player distribution,
+per-player physics/timers, the command interpreter, the per-character command-condition tables, the move
+loader, the move database, animation playback, skeletal TGP render, and collision. A recompilation has,
+from these docs, the full control flow, the hardware/MMIO model, the TGP ISA + command set, all data
+formats, and the complete game-logic pipeline. The only residual work is bulk DATA cataloging (labeling
+every per-character move-state ID with its move-record + human-readable command notation) and the single
+TGP bit-exactness item (mve_calc chain, the braid) - both additive, neither a structural unknown.
+
+## Y. Move-ID space unification & command-group structure (verified)
+Cross-validation confirms a SINGLE unified move-ID space across the whole engine:
+  - The move-state IDs in the per-character command tables (section X; e.g. char0: 0x22f, 0x338, 0x1a6,
+    0x117, 0x065, 0x105, 0x150, 0x1e9) are all < 0x372 = the size of the move-INDEX table at 0xFC0000.
+  - Each resolves directly: move-state ID -> move-index-table[ID] (16-bit offset) -> move data at
+    0xFC06E4 + offset. Verified: 0x22f->0xFC5999, 0x338->0xFC418D, 0x1a6->0xFC4E80, 0x117->0xFC176E,
+    0x065->0xFC1591 (distinct, valid move records).
+  So command table (section X) and move loader FEE1FD (section O) share the SAME move-ID -> move-data
+  resolution. One ID space; no translation layer.
+
+COMMAND-GROUP STRUCTURE (char0 table, verified): 50 entries form 8 command groups (0xFFFF-delimited).
+Each group = one input pattern; it lists candidate move-state IDs, each gated by its condition bytes
+(section X). Groups with >1 entry = the SAME input maps to different moves by STATE (e.g. char0 group[3]
+= {0x117, 0x065}: one input, two moves chosen by the masked state conditions - e.g. standing vs crouching
+vs near-opponent). This is the standard fighting-game pattern: input + state -> move.
+
+So the FULL move-selection data model (recomp-ready):
+  command index (from interpreter, section W) -> char move table 0xFDB820[char] -> command group ->
+  per-entry { move-state ID, condition mask/expected via 0xFDB850/54 } -> first entry whose conditions
+  match -> move-state ID -> move-index 0xFC0000[ID] -> move data 0xFC06E4+ -> FEDB20 playback.
+
+FIGHT ENGINE: fully reverse-engineered and cross-validated. Control flow, all data structures, and the
+unified ID space are documented. Residual = bulk per-move labeling (map each of the ~50 move-state IDs
+per character to its human command notation + frame data by reading each move record) - mechanical data
+extraction, no structural unknowns. The recompilation reference (this document) now covers the complete
+system: hardware/MMIO, V60 control flow, TGP ISA + command set, all data formats, and the entire
+game-logic pipeline from input to render to collision.
+
+## Z. Move record body format (refined, cross-validated on 3 moves)
+Comparing move records (move1@0xFC0C80, move0x065@0xFC1591, move0x117@0xFC176E):
+  m065: 0003 0000 2121 0020 c000 0a09 0a1c 1e00 | 6666 3f66 0000 0d02 ...
+  m117: 0003 0000 2123 0020 c000 0908 0817 1e01 | cccd 3f8c 0000 0700 ...
+  m001: 2003 0040 010c 0020 c000 0605 050a 0c00 | 3333 3f33 0000 0101 ...
+Confirmed layout:
+  word0      = move TYPE/flags (0x0003 attack-type here; 0x2003 for move1).
+  word1      = aux param/flags.
+  word2      = POSE/animation-set selector (0x2121, 0x2123, 0x010c - per-move skeletal pose set).
+  word3      = 0x0020  (FIXED structural marker, all moves).
+  word4      = 0xC000  (FIXED record marker, all moves).
+  words5-7   = frame/timing bytes (e.g. 0a09 0a1c 1e00 - start/active/recovery frame counts).
+  word8-9    = a 32-bit FLOAT (LE: word9<<16|word8): m065 0x3f666666=0.90, m117 0x3f8ccccd=1.10,
+               m001 0x3f333333=0.70 = per-move MOVEMENT/velocity scale (forward step on the attack).
+  +0x14 on   = the keyframe stream (per-frame pose/hitbox data); the recurring word 0x07F4 (~+0x1e)
+               appears as a stream delimiter/keyframe marker.
+So a move record = fixed header (type, pose-set selector, the 0x0020/0xC000 markers) + frame-timing
+counts + an embedded movement float + a keyframe stream. The playback (FEDB20) reads frame counts into
+period 0x650/mode 0x647 and walks the keyframe stream advancing the 12 channels (0x671-0x687).
+
+DATA FORMATS - COMPLETE for the recomp: display list/geometry/polygon/color (DISPLAY_LIST_FORMAT.md),
+the move-index table + move records (this + sections N/O/S), the per-character command-condition tables
+(section X), and the input/state work-RAM layout (sections Q/T/U/V). The exact keyframe-stream micro-
+grammar (per-frame hitbox on/off bytes, cancel-frame flags) is the one sub-format left to enumerate by
+diffing many records frame-by-frame; the record envelope and all driving fields are mapped.
+
+## AA. Keyframe stream format & animation data location (verified code)
+The keyframe handler FF597C (called from playback FEDB20/FEE1C9) walks the per-move keyframe data:
+  - FF5982: bank-switch ROM via E00004 = 0x21 -> the ANIMATION/KEYFRAME data lives in BANKED ROM
+    (the 0x100000 window), not the move record. The move record (sections N/Z) holds timing+params;
+    the actual per-frame skeletal poses are in banked animation ROM.
+  - FF598B: move-state entity[-0x38] indexes a keyframe-pointer table: if state < 0xF3 use bank base
+    0x100000 (R1)+state; else base 0x200004 + (state-0xF3). So move-states < 0xF3 and >= 0xF3 live in
+    two animation banks. -> R0 = keyframe descriptor/pointer for this move-state.
+  - FF59BF: stores the keyframe base to entity[0x4AE]/[0x4B2] (+0x2B stride). Per-keyframe stride = 0x2B
+    (43) channel entries.
+  - FF59F9-FF5A0B: loop 0x2B (43) times over the keyframe's CHANNEL bytes: read channel-type byte [R9]
+    (cmp #1 = channel mode), accumulate per-channel offsets into the work buffer [R8+], advance. So each
+    keyframe = 43 per-channel records; the ~12 accumulators (0x671-0x687) seen earlier are a hot subset
+    of the full 43-channel skeleton.
+  - FF5A56+: reads the channel data bytes to build the frame's pose.
+
+KEYFRAME FORMAT (verified structure): animation = a sequence of keyframes in banked ROM (bank 0x21+),
+indexed by move-state (entity[-0x38]) through a pointer table (split at state 0xF3 across two banks).
+Each keyframe = 43 channel entries (a type byte + data per channel) covering the full character skeleton.
+Playback (FEDB20) advances the current frame (entity[-0x32]) over period (0x650) in mode (0x647),
+interpolating the 43 channels; FF597C resolves/loads the keyframe; FF5FA1/FF609E render the resulting
+skeleton via the TGP.
+
+ALL DATA FORMATS NOW MAPPED: geometry/display-list/color (DISPLAY_LIST_FORMAT.md); move-index table +
+move records + embedded movement floats (N/O/S/Z); per-character command-condition tables (X); keyframe
+animation streams in banked ROM, 43 channels/keyframe, move-state-indexed (this section); input/state
+work-RAM layout (Q/T/U/V). The fight engine's control flow AND every data structure it touches are
+documented and verified. Residual = bulk per-move labeling and the exact per-channel type-byte semantics
+(diff many keyframes), both mechanical; no structural unknowns remain for the game logic.
+
+## AB. Sound subsystem (68000 program, host protocol, MultiPCM/YM3438), verified
+
+The sound board is fully documented in `SOUND.md`; this section records how it
+plugs into the recompilation.  Source: disassembly of the VF sound ROM
+(epr-16120/epr-16121, word-swapped to big-endian m68k order) cross-checked against
+the driver memory map and machine config.
+
+Hardware: TMP68000 @10 MHz, two Sega 315-5560 MultiPCM @8 MHz ("sega1"/"sega2"),
+one YM3438 @8 MHz.  Only IRQ level 2 is used; the main CPU asserts it on every
+sound-command write.
+
+Sound 68000 map: 000000-0bffff ROM (epr-16120 @0, epr-16121 @020000 and reloaded
+@080000); c20000/c20003 host command latch + handshake; c40000-7/c50000 MultiPCM#1
++ bank; c60000-7/c70000 MultiPCM#2 + bank; d00000-7 YM3438 (two address/data
+banks); c10001 board control; f00000-f0ffff work RAM (SSP=0f0fffe).
+
+Vectors: reset PC=000200, IRQ2=000120, everything else=000100 (nop;rte).
+
+Command path (the contract the recomp must preserve):
+- The V60 sound-latch write pushes one byte to a ring buffer and raises IRQ2.
+- IRQ2 handler (000120) decodes the lead byte: 0xff = idle (ignored), >=0xf0 =
+  control (not enqueued), bit-7-set = multibyte (length 2 for 0xc0-0xdf, 3 for
+  >=0xe0).  Bytes are queued at f00000.., wrapping at f01000; f01007 counts
+  complete commands.
+- The foreground loop (0003f0) is gated by the YM3438 timer-A flag (d00001 bit 1):
+  on each tick it runs the sequencer step (000424, a 36-entry event list at
+  f01504 stride 0x0e) and a per-voice volume refresh; between ticks it drains the
+  command queue (0006da).
+- Command grammar: high nibble = opcode (0x8n note-off, 0x9n note-on, 0xCn/0xDn
+  parameter), low nibble = channel (1 of 13 blocks at f01300).  A software master
+  volume at f0101e multiplies each channel level (>>8) on top of the MultiPCM
+  envelope.
+
+Chip protocols:
+- MultiPCM write = poll status (port+1 bit0), write reg index to port+5, poll,
+  write data to port+1.  Voices split across the two chips by bit 3 of the voice
+  control byte; bank select is one byte to c50001/c70001 at 0x100000 granularity.
+- YM3438 write = poll d00001 bit7, write reg to address port, poll, write data to
+  data port; part 0 = d00001/d00003 (ch 1-3), part 1 = d00005/d00007 (ch 4-6).
+
+Recomp strategy: the 68000 need not be emulated.  Implement the ring-buffer
+producer off the main CPU's latch write, run the engine tick off a YM timer-A-rate
+timer, keep the command grammar and the channel-to-chip / bank / master-volume
+behaviour, and drive MultiPCM + YM3438 via existing cores or native synthesis.
+
+## AC. 2D tilemap layer (Sega System 24 tile hardware), verified
+
+Full detail in `TILEMAP.md`; this records the recomp hook.  The Model 1 reuses the
+System 24 tilemap chip for its 2D overlay (life bars, scores, attract text,
+backdrops), drawn around the 3D scene.
+
+V60 map: 700000 tile RAM, 780000 character RAM, 900000 palette RAM (loaded from
+ROM 0xFD0770), 910000 colour translation.  Tile RAM word layout: 0x0000-0x3fff
+four 64x64 name tables (layer0 scroll/window = 0x0000/0x1000, layer1 = 0x2000/
+0x3000); 0x4000+0x200*layer per-line H-scroll tables; 0x5000/0x5004 per-pair H/V
+scroll + control; 0x6000/0x6800 8-pixel layer-select masks.
+
+Name-table entry (16 bits): bit15 = category/priority, bits14-7 = colour, low bits
+& 0x3fff = tile number.  Tiles are 8x8, 4bpp, 32 bytes, pen 0 transparent, char
+words big-endian (WORD_XOR_BE).
+
+Four layers in two pairs; an 8-pixel-granular mask selects which layer of a pair
+shows per 8-pixel column (windowing).  vscr bit15 = layer disable.  Per-line
+H-scroll when hscr bit15 + control bits 13-14 (modes 1/2/3 = swap/clip variants).
+
+Palette (16-bit): R=((w&0xf)<<4)|(w&0x1000?8:0), G=(w&0xf0)|(w&0x2000?8:0),
+B=((w&0xf00)>>4)|(w&0x4000?8:0), each |= >>5; bit15 = highlight (a shadow/highlight
+copy stored at index + total_colors/2).
+
+Draw order: low-priority halves (layers 6,4,2,0) below the 3D scene, high-priority
+halves (7,5,3,1) above.  Recomp: walk 64x64 8x8 tiles per layer/category with
+scroll applied, sample the 8-pixel mask to pick the active paired layer, write
+pen!=0 with the decoded colour (shadow/highlight bank on bit15).  Everything is in
+RAM (no gfx ROMs), so the rasteriser reads the tile RAM image directly.
+
+## AD. Keyframe stream channel grammar (type byte / interpolation), verified
+
+Full detail in `KEYFRAME_FORMAT.md`; this records the recomp hook.  Extends
+sections N/S/Z/AA with the per-channel keyframe grammar from the FF597C decoder.
+
+Move-state -> keyframe pointer (FF597C): bank in 0x21 (E00004); state = entity
+[-0x38]; if state < 0xF3 base = 0x100000, index = state-1; if state >= 0xF3 base =
+0x200004, index = state-0xF3.  A rate-shift flag R20 (1 or 2) comes from whether
+the pointer is below 0x200000.
+
+Each keyframe record = 43 channels (stride 0x2B); two cursors one stride apart
+(entity 0x4AE current, 0x4B2 next) interpolate between the current and next
+record using a per-period step from entity 0x650.
+
+Per-channel grammar, in order: [type byte] (0/1 = static/held, other =
+interpolated -> add the step); [duration byte] (0 = use the period 0x650, else the
+count scaled by the rate shift); [16-bit value] (raw word for some channels;
+SIGNED 16-bit sign-extended + cvt.ws to float for the TGP-fed channels, streamed
+via port R24 and read back from R23).  A second pass (39 entries) copies resolved
+pose halfwords to the render work area at entity 0x45C.
+
+Recomp: resolve the pointer with the 0xF3 split + rate flag (off-by-one shifts the
+whole animation); apply the type-byte rule, the zero-duration-defaults-to-period
+rule, and the signed-16 -> float conversion; compute the linear blend between the
+two records in floats and skip the TGP round-trip for pose-only channels.
+
+## AE. Per-character move catalog (command -> move-state table), verified
+
+Full detail in `MOVE_CATALOG.md`; this records the recomp hook.  Resolves the
+per-character command->move table walked by the trigger FEAB4C (sections W/X/Y).
+
+Tables: FDB820 = per-character pointer array (one 32-bit pointer per fighter,
+0x15E apart; verified [0]=FDB8A0, [1]=FDB9FE, [2]=FDBB5C ... 8 fighters + extras);
+FDB850/FDB854 = condition mask / expected-value tables.  Each character table is
+0x15E (350) bytes = 25 entries of 14 (0x0E) bytes.
+
+Entry layout (14 bytes, verified): +0 word = move-state ID (unified space with the
+move-index and keyframe tables; FFFF = empty slot / group separator); +2..+4 =
+stick/direction sub-conditions; +5 = cancel-window / frame threshold vs entity
+-0x32 (common 0x0C/0x0E); +6 = 00; +7..+10 = condition value block (FF FF FF FF =
+wildcard, else masked self 0x156D/-0x36 + opponent -0x36 comparison via FDB850/
+FDB854); +11..+13 = move modifier/flags.
+
+Resolution: FEAB4C takes the character index from entity[-0x50+0xC], looks up the
+table, and linearly scans the matching command group's entries; it checks the
+cancel-window (+5 vs -0x32) and the masked state values (+7..+10, FF = wildcard),
+and on the first match stores the move-state ID (+0) into entity[-0x4A] for the
+move loader FEE1FD.  Groups with multiple non-FFFF entries = one input mapping to
+state-gated alternative moves.
+
+Recomp: rebuild the 25 x 14-byte tables from ROM; the move-state IDs index the
+move and keyframe tables directly; the matcher is the linear scan above.  Human
+command notation (P/K/G/df+P) is not in ROM -- it is implied by the command-group
+position and the character-independent stick/button decode (section W).

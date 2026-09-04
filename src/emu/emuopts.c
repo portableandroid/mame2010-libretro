@@ -64,24 +64,12 @@ const options_entry mame_core_options[] =
 	{ "state",                       NULL,        0,                 "saved state to load" },
 	{ "autosave",                    "0",         OPTION_BOOLEAN,    "enable automatic restore at startup, and automatic save at exit time" },
 	{ "playback;pb",                 NULL,        0,                 "playback an input file" },
-	{ "record;rec",                  NULL,        0,                 "record an input file" },
-	{ "mngwrite",                    NULL,        0,                 "optional filename to write a MNG movie of the current session" },
-	{ "aviwrite",                    NULL,        0,                 "optional filename to write an AVI movie of the current session" },
-	{ "wavwrite",                    NULL,        0,                 "optional filename to write a WAV file of the current session" },
-	{ "snapname",                    "%g/%i",     0,                 "override of the default snapshot/movie naming; %g == gamename, %i == index" },
-	{ "snapsize",                    "auto",      0,                 "specify snapshot/movie resolution (<width>x<height>) or 'auto' to use minimal size " },
-	{ "snapview",                    "internal",  0,                 "specify snapshot/movie view or 'internal' to use internal pixel-aspect views" },
-	{ "burnin",                      "0",         OPTION_BOOLEAN,    "create burn-in snapshots for each screen" },
 
 	/* performance options */
 	{ NULL,                          NULL,        OPTION_HEADER,     "CORE PERFORMANCE OPTIONS" },
 	{ "autoframeskip;afs",           "0",         OPTION_BOOLEAN,    "enable automatic frameskip selection" },
 	{ "frameskip;fs(0-10)",          "0",         0,                 "set frameskip to fixed value, 0-10 (autoframeskip must be disabled)" },
-	{ "seconds_to_run;str",          "0",         0,                 "number of emulated seconds to run before automatically exiting" },
-	{ "throttle",                    "1",         OPTION_BOOLEAN,    "enable throttling to keep game running in sync with real time" },
-	{ "sleep",                       "1",         OPTION_BOOLEAN,    "enable sleeping, which gives time back to other applications when idle" },
 	{ "speed(0.01-100)",             "1.0",       0,                 "controls the speed of gameplay, relative to realtime; smaller numbers are slower" },
-	{ "refreshspeed;rs",             "0",         OPTION_BOOLEAN,    "automatically adjusts the speed of gameplay to keep the refresh rate lower than the screen" },
 
 	/* rotation options */
 	{ NULL,                          NULL,        OPTION_HEADER,     "CORE ROTATION OPTIONS" },
@@ -132,8 +120,8 @@ const options_entry mame_core_options[] =
 	{ "steadykey;steady",            "0",         OPTION_BOOLEAN,    "enable steadykey support" },
 	{ "offscreen_reload;reload",     "0",         OPTION_BOOLEAN,    "convert lightgun button 2 into offscreen reload" },
 	{ "joystick_map;joymap",         "auto",      0,                 "explicit joystick map, or auto to auto-select" },
-	{ "joystick_deadzone;joy_deadzone;jdz",      "0.3",  0,          "center deadzone range for joystick where change is ignored (0.0 center, 1.0 end)" },
-	{ "joystick_saturation;joy_saturation;jsat", "0.85", 0,          "end of axis saturation range for joystick where change is ignored (0.0 center, 1.0 end)" },
+	{ "joystick_deadzone;joy_deadzone;jdz",      "0",  0,          "center deadzone range for joystick where change is ignored (0.0 center, 1.0 end)" },
+	{ "joystick_saturation;joy_saturation;jsat", "1", 0,          "end of axis saturation range for joystick where change is ignored (0.0 center, 1.0 end)" },
 	{ "natural;nat",				 "0",		  OPTION_BOOLEAN,	 "specifies whether to use a natural keyboard or not" },
 	{ "uimodekey;umk",      		 "auto",	  0,    			 "specifies the key used to toggle between full and partial UI mode" },
 

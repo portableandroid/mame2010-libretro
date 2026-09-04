@@ -797,13 +797,13 @@ static WRITE16_HANDLER(md0_w)
 
 static WRITE16_HANDLER(p_w)
 {
-	UINT16 old = space->machine->generic.paletteram.u16[offset];
+	uint16_t old = space->machine->generic.paletteram.u16[offset];
 	paletteram16_xBBBBBGGGGGRRRRR_word_w(space, offset, data, mem_mask);
 	if(0 && space->machine->generic.paletteram.u16[offset] != old)
 		logerror("XVIDEO: p_w %x, %04x @ %04x (%x)\n", offset, data, mem_mask, cpu_get_pc(space->cpu));
 }
 
-static UINT16 *mr;
+static uint16_t *mr;
 static WRITE16_HANDLER(mr_w)
 {
 	COMBINE_DATA(mr+offset);
@@ -811,7 +811,7 @@ static WRITE16_HANDLER(mr_w)
 		logerror("MR.w %x, %04x @ %04x (%x)\n", offset*2+0x500000, data, mem_mask, cpu_get_pc(space->cpu));
 }
 
-static UINT16 *mr2;
+static uint16_t *mr2;
 static WRITE16_HANDLER(mr2_w)
 {
 	COMBINE_DATA(mr2+offset);
@@ -959,7 +959,7 @@ ADDRESS_MAP_END
 
 static READ16_HANDLER( m1_snd_68k_latch_r )
 {
-	UINT16 retval;
+	uint16_t retval;
 
 	retval = to_68k[fifo_rptr];
 
@@ -1581,8 +1581,8 @@ static MACHINE_DRIVER_START( model1_vr )
 MACHINE_DRIVER_END
 
 GAME( 1993, vf,       0,       model1,    vf,       0, ROT0, "Sega", "Virtua Fighter", GAME_IMPERFECT_GRAPHICS )
-GAME( 1992, vr,       0,       model1_vr, vr,       0, ROT0, "Sega", "Virtua Racing", GAME_IMPERFECT_GRAPHICS )
-GAME( 1993, vformula, vr,      model1_vr, vr,       0, ROT0, "Sega", "Virtua Formula", GAME_IMPERFECT_GRAPHICS )
+GAME( 1992, vr,       0,       model1,    vr,       0, ROT0, "Sega", "Virtua Racing", GAME_IMPERFECT_GRAPHICS )
+GAME( 1993, vformula, vr,      model1,    vr,       0, ROT0, "Sega", "Virtua Formula", GAME_IMPERFECT_GRAPHICS )
 GAME( 1993, swa,      0,       model1,    swa,      0, ROT0, "Sega", "Star Wars Arcade", GAME_NOT_WORKING | GAME_IMPERFECT_SOUND )
 GAME( 1994, wingwar,  0,       model1,    wingwar,  0, ROT0, "Sega", "Wing War (World)", GAME_NOT_WORKING )
 GAME( 1994, wingwaru, wingwar, model1,    wingwar,  0, ROT0, "Sega", "Wing War (US)", GAME_NOT_WORKING )

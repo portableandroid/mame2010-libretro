@@ -45,23 +45,11 @@
 #define OPTION_STATE				"state"
 #define OPTION_AUTOSAVE				"autosave"
 #define OPTION_PLAYBACK				"playback"
-#define OPTION_RECORD				"record"
-#define OPTION_MNGWRITE				"mngwrite"
-#define OPTION_AVIWRITE				"aviwrite"
-#define OPTION_WAVWRITE				"wavwrite"
-#define OPTION_SNAPNAME				"snapname"
-#define OPTION_SNAPSIZE				"snapsize"
-#define OPTION_SNAPVIEW				"snapview"
-#define OPTION_BURNIN				"burnin"
 
 /* core performance options */
 #define OPTION_AUTOFRAMESKIP		"autoframeskip"
 #define OPTION_FRAMESKIP			"frameskip"
-#define OPTION_SECONDS_TO_RUN		"seconds_to_run"
-#define OPTION_THROTTLE				"throttle"
-#define OPTION_SLEEP				"sleep"
 #define OPTION_SPEED				"speed"
-#define OPTION_REFRESHSPEED			"refreshspeed"
 
 /* core rotation options */
 #define OPTION_ROTATE				"rotate"

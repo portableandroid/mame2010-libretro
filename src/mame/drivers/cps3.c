@@ -11,40 +11,118 @@ Sound emulation by Philip Bennett
 
 SCSI code by ElSemi
 
-ToDo: (in order or priority?)
+Known Issues:
 
-Street Fighter 3 2nd Impact uses flipped tilemaps during flashing, emulate this.
+ Whole screen flip is not emulated. SFIII 2nd Impact uses it during the
+ SIMM-flashing/boot animation; this is part of the more general screen-flip
+ register and not specific to that game.
 
-Figure out proper IRQ10 generation:
- If we generate on DMA operations only then Warzard is OK, otherwise it hangs during attract
- HOWEVER, SFIII2 sometimes has messed up character profiles unless we also generate it periodicly.
- I think the corrupt background on some of the lighning effects may be realted to this + the DMA
- status flags.
+Miscellaneous TO-DOs:
 
-Alpha Blending Effects
-    These are actually palette manipulation effects, not true blending.  How the values are used is
-    not currently 100% understood.  They are incorrect if you use player 2 in Warzard
+DMA ack IRQ10 generation:
+ Character and Palette DMA completion drives IRQ10 on real hardware. The
+ effective speed of each DMA is unknown and would need to be measured; the
+ current emulation triggers the completion IRQ immediately, which keeps
+ Warzard's attract loop happy but may produce subtly incorrect timing in
+ places that overlap DMAs with foreground game logic.
 
-Linezoom
-    Is it used anywhere??
+Alpha Blending Effects:
+ These are palette manipulation effects, not true blending. The blend bit
+ paths in cps3_drawgfxzoom are still approximate; verify against real
+ hardware where possible.
 
-Palette DMA effects
-    Verify them, they might not be 100% accurate at the moment
+Tilemap Linezoom:
+ Appears unused by retail games; may be enabled in the jojo/jojoba dev
+ menu's BG test (P2 button 4).
 
-Verify Full Screen Zoom on real hardware
- Which is which, x & y registers, how far can it zoom etc.
+Palette DMA effects:
+ Verify; the multi-stage fade/mask path may not be 100% accurate.
 
-Verify CRT registers
- Only SFIII2 changes them, for widescreen mode.  What other modes are possible?
+Verify Full Screen Zoom on real hardware:
+ How far can it zoom in each direction etc.
 
-Sprite positioning glitches
- Some sprites are still in the wrong places, seems the placement of zooming sprites is imperfect
- eg. warzard intro + cutscenes leave the left most 16 pixels uncovered because the sprite is positioned incorrectly,
-     the same occurs in the sf games.  doesn't look like the origin is correct when zooming in all cases.
+Verify CRT registers:
+ The actual pixel clock for the H Start and H Blank registers is unknown.
+ It is not known which is the base pixel clock and how it is affected by
+ the bits of register 0x40C0080. See the PPU register table below.
 
-Gaps in Sprite Zooming
- probably cause by use of drawgfx instead of processing as a single large sprite, but could also be due to the
- positioning of each part of the sprite.  Warzard is confirmed to have gaps during some cutscenes on real hardware.
+Sprite positioning glitches:
+ Some sprites are still in the wrong places; the placement of zooming
+ sprites is imperfect. e.g. the warzard intro and cutscenes leave the
+ left-most 16 pixels uncovered because the sprite is positioned
+ incorrectly, the same occurs in the sf games. Doesn't look like the
+ origin is correct when zooming in all cases.
+
+Gaps in Sprite Zooming:
+ Warzard is confirmed to have gaps during some cutscenes on real
+ hardware, so the visible gaps there are authentic. Elsewhere they may
+ still be an artefact of drawing scaled sprites tile-by-tile rather than
+ as a single large primitive.
+
+---
+
+PPU and SS register layout (write-side; offsets in the 0x040C0000 / 0x05050000
+windows). Captured here for reference -- not every register is currently
+modelled by this driver, but having the table next to the address map keeps
+the mapping decisions auditable.
+
+PPU read regs at 0x040C0000-0x040C000D:
+  +0C  bit 2  Palette DMA active
+       bit 1  Character DMA active
+       bit 0  Sprite list DMA / copy active (paired with reg 0x82 at +0x80)
+
+PPU write regs at 0x040C0000-0x040C00AF:
+  +00..+1F  Global scrolls 0..7 (x,y pairs, 10-bit fields)
+  +20..+5F  Tilemap 0..3 control (scroll x/y, width, flip, line-scroll/zoom
+            base, tile base) -- four blocks of 0x10 bytes each
+  +60..+7F  CRT timing: H/V sync end, blank end, screen end, total end, plus
+            H/V zoom master, zoom offset, zoom size, zoom scale (see code
+            below for the field-by-field layout)
+  +80       bits 0..2 Pixel clock (3 = /5 divider, 5 = /4 divider; base
+                       clock is 42.954545MHz)
+            bits 3..4 Flip screen X/Y
+            bit  5    Always 1 in 15kHz modes (pixel clock divider?)
+            bit  6    Cleared by BIOS init, set after video mode select
+            bit  15   Always 0
+  +82       Sprite list DMA / copy to PPU on-chip RAM (the 8/9/8/9 trigger;
+            wait for read reg 0x0C bit 0 to clear, then write 0)
+  +84       Always set to 0x0800 (bit 11)
+  +86       Character RAM bank, 4 bits
+  +88       GFX flash ROM bank, 6 bits
+  +8A       Cleared by BIOS init, never written later
+  +8E       Char/Pal DMA IRQ enable: BIOS init writes 0xA0 once
+  +96..+98  Character DMA Source (16+6 bits) + start bit at +98 bit 14
+  +A0..+A6  Palette DMA Source (high 11 + low 16 bits), Destination
+            (high 1 + low 16 bits)
+  +A8..+AA  Palette DMA Fade low/high (the 32-bit fadeval consumed by
+            cps3_set_mame_colours)
+  +AC..+AE  Palette DMA Length low/high + start bit at +AE bit 1
+
+CRT timing fields (offsets inside the +60..+7F block):
+   +60 H Sync end       +68 H zoom master?   +70 V Sync end
+   +62 H Blank end      +6A H zoom offset?   +72 V Blank end
+   +64 H Screen end     +6C H zoom size?     +74 V Screen end
+   +66 H Total end      +6E H Zoom Scale     +76 V Total end
+                                              +78 V zoom master?
+                                              +7A V zoom offset?
+                                              +7C V zoom size?
+                                              +7E V Zoom Scale
+
+H Total is fixed at 454 for all 15kHz modes; the unused 24kHz 512x384 mode
+uses H Total 293 / V Total 424.
+
+SS layer ("Score Screen" text tilemap) write regs at 0x05050000-0x05050029,
+even bytes only (umask 0x00FF00FF on dword writes):
+  +00 H Sync         +0A V Start L       +12 Palette base
+  +01 H Start L      +0B V Start H       +13 Pixel clock (low 3 bits)
+  +02 H Start H      +0C V Blank L       +14 Flip screen X/Y
+  +03 H Blank L      +0D V Blank H
+  +04 H Blank H      +0E V Total L
+  +05 H Total L      +0F V Total H
+  +06 H Total H      +10 V Scroll L
+  +07 H Scroll L     +11 V Scroll H
+  +08 H Scroll H
+  +09 V Sync
 
 ---
 
@@ -326,6 +404,17 @@ Notes:
 #include "includes/cps3.h"
 #include "machine/wd33c93.h"
 
+/* SIMD acceleration for the native-scale tile blit inner loop.  The kernels
+   below are bit-exact with the scalar path and are selected at compile time;
+   when neither SSE2 nor NEON is targeted the scalar fallback is used.  */
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#define CPS3_HAVE_SSE2 1
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define CPS3_HAVE_NEON 1
+#endif
+
 #define MASTER_CLOCK	42954500
 
 /* load extracted cd content? */
@@ -337,41 +426,91 @@ Notes:
 #define DMA_XOR(a)		((a) ^ NATIVE_ENDIAN_VALUE_LE_BE(1,2))
 
 
-static UINT32* decrypted_bios;
+static uint32_t* decrypted_bios;
 
-static UINT32* decrypted_gamerom;
-static UINT32 cram_gfxflash_bank;
-static UINT32* cps3_nops;
+static uint32_t* decrypted_gamerom;
+static uint32_t cram_gfxflash_bank;
+static uint32_t* cps3_nops;
 
-static UINT32* tilemap20_regs_base;
-static UINT32* tilemap30_regs_base;
-static UINT32* tilemap40_regs_base;
-static UINT32* tilemap50_regs_base;
+static uint32_t* tilemap20_regs_base;
+static uint32_t* tilemap30_regs_base;
+static uint32_t* tilemap40_regs_base;
+static uint32_t* tilemap50_regs_base;
 
-static UINT32* cps3_0xc0000000_ram;
-static UINT32* cps3_0xc0000000_ram_decrypted;
+static uint32_t* cps3_0xc0000000_ram;
+static uint32_t* cps3_0xc0000000_ram_decrypted;
 
-static UINT32* cps3_char_ram;
+static uint32_t* cps3_char_ram;
 
-static UINT32* cps3_spriteram;
-static UINT32* cps3_eeprom;
-static UINT32* cps3_fullscreenzoom;
+static uint32_t* cps3_spriteram;
+static uint32_t* cps3_eeprom;
+static uint32_t* cps3_fullscreenzoom;
 
-static UINT32 cps3_ss_pal_base = 0;
-static UINT32* cps3_colourram;
-static UINT32 cps3_unk_vidregs[0x20/4];
-static UINT32 cps3_ss_bank_base = 0;
+static uint32_t cps3_ss_pal_base = 0;
+static uint32_t* cps3_colourram;
+static uint32_t cps3_unk_vidregs[0x20/4];
+static uint32_t cps3_ss_bank_base = 0;
 
-static UINT32 cps3_screenwidth;
+static uint32_t cps3_screenwidth;
 //cdrom_file* cps3_cd;
 
-static UINT32* cps3_mame_colours;//[0x20000]; // actual values to write to 32-bit bitmap
+static uint32_t* cps3_mame_colours;//[0x20000]; // actual values to write to 32-bit bitmap
 
 static bitmap_t *renderbuffer_bitmap;
 static rectangle renderbuffer_clip;
 
-static UINT8* cps3_user4region;
-UINT8* cps3_user5region;
+/* Ordered draw list for the CPS3 compositor.
+
+   VIDEO_UPDATE walks the sprite list and composites sprite cells and the
+   four tilemap layers into renderbuffer_bitmap.  The relative order of those
+   operations is the z-order, encoded by their position in the sprite list.
+   Rather than blit inline while walking, the walk now emits an ordered list
+   of draw commands which is then rasterized in order.  The output is
+   identical -- this is a pure restructuring of the same operations in the
+   same order -- but it gives a single backend-agnostic command stream that a
+   future hardware compositor can consume directly instead of the software
+   blitter.
+
+   The two command kinds are a single sprite tile blit and a "draw tilemap
+   layer N" marker (there are at most four of the latter per frame).  The
+   list lives in a fixed pre-allocated buffer so there is no per-frame
+   allocation; if a frame ever emits more than the cap the list is flushed
+   (rasterized in order) and reused, which keeps the z-order correct and can
+   never overflow. */
+enum
+{
+	CPS3_CMD_SPRITE = 0,
+	CPS3_CMD_TILEMAP = 1
+};
+
+typedef struct _cps3_draw_cmd
+{
+	int      type;
+	/* sprite tile fields */
+	int      tileno;
+	int      pal;
+	int      flipx;
+	int      flipy;
+	int      xpos;
+	int      ypos;
+	int      transparency;
+	int      color_granularity;
+	uint32_t xinc;
+	uint32_t yinc;
+	/* tilemap field */
+	int      tilemapnum;
+} cps3_draw_cmd;
+
+#define CPS3_DRAW_LIST_MAX 16384
+static cps3_draw_cmd cps3_draw_list[CPS3_DRAW_LIST_MAX];
+static int cps3_draw_list_count;
+
+static uint8_t* cps3_user4region;
+uint8_t* cps3_user5region;
+/* Byte length of the user5 (sample) region, exported so the sound device
+   can bound its sample fetches and never read outside the region even if a
+   voice's registers point past the end. */
+uint32_t cps3_user5region_length;
 #define USER4REGION_LENGTH 0x800000*2
 #define USER5REGION_LENGTH 0x800000*10
 
@@ -380,14 +519,539 @@ UINT8* cps3_user5region;
 #define CPS3_TRANSPARENCY_PEN_INDEX 2
 #define CPS3_TRANSPARENCY_PEN_INDEX_BLEND 3
 
+/* Forward (non-flipped, contiguous-source) row blit for the native-scale
+   fast path.  These take pen indices straight from the source and write the
+   renderbuffer.  Three transparency modes are handled:
+     - NONE       : opaque, dest = pal[c]
+     - PEN        : dest = pal[c] when c != 0
+     - PEN_INDEX  : dest = c | palbase when c != 0   (CPS3's usual layer/sprite mode)
+   The SSE2 and NEON bodies are verified bit-exact against the scalar tail,
+   which also handles any trailing pixels (width not a multiple of 16) and the
+   case where SIMD is not compiled in. */
+
+static void cps3_blit_row_penindex(uint32_t *dest, const uint8_t *src, int n, uint32_t palbase)
+{
+	int x = 0;
+	/* Only enter the vectorised path when there is at least one full
+	   16-pixel block to process.  Narrow rows -- e.g. tiles clipped to a
+	   few pixels at a screen edge -- would otherwise pay for the SIMD
+	   constant setup and then fall straight through to the scalar tail,
+	   which measured slower than just running the scalar loop. */
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i vpal = _mm_set1_epi32((int)palbase);
+		__m128i zero = _mm_setzero_si128();
+		for (; x+16 <= n; x += 16)
+		{
+			__m128i bytes = _mm_loadu_si128((const __m128i*)(src+x));
+			__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+			__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+			__m128i v[4];
+			int g;
+			v[0] = _mm_unpacklo_epi16(lo8, zero);
+			v[1] = _mm_unpackhi_epi16(lo8, zero);
+			v[2] = _mm_unpacklo_epi16(hi8, zero);
+			v[3] = _mm_unpackhi_epi16(hi8, zero);
+			for (g = 0; g < 4; g++)
+			{
+				uint32_t *d = dest + x + g*4;
+				__m128i ored = _mm_or_si128(v[g], vpal);
+				__m128i mask = _mm_cmpeq_epi32(v[g], zero);     /* ones where transparent */
+				__m128i dold = _mm_loadu_si128((const __m128i*)d);
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_and_si128(mask, dold), _mm_andnot_si128(mask, ored)));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t vpal = vdupq_n_u32(palbase);
+		uint32x4_t vzero = vdupq_n_u32(0);
+		for (; x+16 <= n; x += 16)
+		{
+			uint8x16_t bytes = vld1q_u8(src+x);
+			uint16x8_t lo16 = vmovl_u8(vget_low_u8(bytes));
+			uint16x8_t hi16 = vmovl_u8(vget_high_u8(bytes));
+			uint32x4_t v[4];
+			int g;
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32_t *d = dest + x + g*4;
+				uint32x4_t ored = vorrq_u32(v[g], vpal);
+				uint32x4_t mask = vceqq_u32(v[g], vzero);       /* ones where transparent */
+				uint32x4_t dold = vld1q_u32(d);
+				vst1q_u32(d, vbslq_u32(mask, dold, ored));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++) { int c = src[x]; if (c != 0) dest[x] = c | palbase; }
+}
+
+/* Flipped (flipx) forward-Y variant of the PEN_INDEX row blit.  Output pixel
+   x reads srcrow[sxi_base - x], i.e. the source row is consumed in reverse.
+   The kernel loads the contiguous 16-byte source span that backs a 16-pixel
+   output block, reverses the bytes, then performs the same widen / OR /
+   masked-store as the forward kernel.  Bit-exact with the scalar reverse
+   loop; the scalar tail handles widths not a multiple of 16 and non-SIMD
+   builds. */
+static void cps3_blit_row_penindex_flip(uint32_t *dest, const uint8_t *srcrow, int sxi_base, int n, uint32_t palbase)
+{
+	int x = 0;
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i vpal = _mm_set1_epi32((int)palbase);
+		__m128i zero = _mm_setzero_si128();
+		for (; x+16 <= n; x += 16)
+		{
+			/* output [x..x+15] reads srcrow[base-x .. base-x-15], which is
+			   the contiguous span srcrow[base-x-15 .. base-x] reversed. */
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			__m128i bytes = _mm_loadu_si128((const __m128i*)p);
+			__m128i v[4];
+			int g;
+			/* byte-reverse the 16-byte vector (SSE2, no SSSE3):
+			   swap bytes within each 16-bit lane, reverse the 8 lanes,
+			   then swap the two 64-bit halves. */
+			bytes = _mm_or_si128(_mm_slli_epi16(bytes, 8), _mm_srli_epi16(bytes, 8));
+			bytes = _mm_shufflelo_epi16(bytes, 0x1B);
+			bytes = _mm_shufflehi_epi16(bytes, 0x1B);
+			bytes = _mm_shuffle_epi32(bytes, 0x4E);
+			{
+				__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+				__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+				v[0] = _mm_unpacklo_epi16(lo8, zero);
+				v[1] = _mm_unpackhi_epi16(lo8, zero);
+				v[2] = _mm_unpacklo_epi16(hi8, zero);
+				v[3] = _mm_unpackhi_epi16(hi8, zero);
+			}
+			for (g = 0; g < 4; g++)
+			{
+				uint32_t *d = dest + x + g*4;
+				__m128i ored = _mm_or_si128(v[g], vpal);
+				__m128i mask = _mm_cmpeq_epi32(v[g], zero);
+				__m128i dold = _mm_loadu_si128((const __m128i*)d);
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_and_si128(mask, dold), _mm_andnot_si128(mask, ored)));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t vpal = vdupq_n_u32(palbase);
+		uint32x4_t vzero = vdupq_n_u32(0);
+		for (; x+16 <= n; x += 16)
+		{
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			uint8x16_t bytes = vld1q_u8(p);
+			uint16x8_t lo16, hi16;
+			uint32x4_t v[4];
+			int g;
+			/* byte-reverse: reverse within each 64-bit half, then swap halves */
+			bytes = vrev64q_u8(bytes);
+			bytes = vcombine_u8(vget_high_u8(bytes), vget_low_u8(bytes));
+			lo16 = vmovl_u8(vget_low_u8(bytes));
+			hi16 = vmovl_u8(vget_high_u8(bytes));
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32_t *d = dest + x + g*4;
+				uint32x4_t ored = vorrq_u32(v[g], vpal);
+				uint32x4_t mask = vceqq_u32(v[g], vzero);
+				uint32x4_t dold = vld1q_u32(d);
+				vst1q_u32(d, vbslq_u32(mask, dold, ored));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++) { int c = srcrow[sxi_base - x]; if (c != 0) dest[x] = c | palbase; }
+}
+
+/* Forward granularity-64 blend row.  Blend does not write a colour; for each
+   non-zero source index it ORs fixed bits into the destination based on the
+   low nibble (c&1->0x2000, c&2->0x4000, c&4->0x8000, c&8->0x10000).  The
+   per-pixel scalar form has four dependent branches; the vector form is
+   branchless (build the OR value from per-bit compares and OR it in), which
+   is bit-identical -- a zero source contributes no bits, so the c!=0 guard is
+   subsumed -- and noticeably faster.  Scalar tail handles the remainder and
+   non-SIMD builds. */
+static void cps3_blit_row_blend64(uint32_t *dest, const uint8_t *src, int n)
+{
+	int x = 0;
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i zero = _mm_setzero_si128();
+		__m128i b2000 = _mm_set1_epi32(0x2000), b4000 = _mm_set1_epi32(0x4000);
+		__m128i b8000 = _mm_set1_epi32(0x8000), b10000 = _mm_set1_epi32(0x10000);
+		__m128i m1 = _mm_set1_epi32(1), m2 = _mm_set1_epi32(2), m4 = _mm_set1_epi32(4), m8 = _mm_set1_epi32(8);
+		for (; x+16 <= n; x += 16)
+		{
+			__m128i bytes = _mm_loadu_si128((const __m128i*)(src+x));
+			__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+			__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+			__m128i v[4];
+			int g;
+			v[0] = _mm_unpacklo_epi16(lo8, zero);
+			v[1] = _mm_unpackhi_epi16(lo8, zero);
+			v[2] = _mm_unpacklo_epi16(hi8, zero);
+			v[3] = _mm_unpackhi_epi16(hi8, zero);
+			for (g = 0; g < 4; g++)
+			{
+				__m128i c = v[g];
+				__m128i o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m1), m1), b2000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m2), m2), b4000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m4), m4), b8000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m8), m8), b10000));
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_loadu_si128((const __m128i*)d), o));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t b2000 = vdupq_n_u32(0x2000), b4000 = vdupq_n_u32(0x4000);
+		uint32x4_t b8000 = vdupq_n_u32(0x8000), b10000 = vdupq_n_u32(0x10000);
+		uint32x4_t m1 = vdupq_n_u32(1), m2 = vdupq_n_u32(2), m4 = vdupq_n_u32(4), m8 = vdupq_n_u32(8);
+		uint32x4_t z = vdupq_n_u32(0);
+		for (; x+16 <= n; x += 16)
+		{
+			uint8x16_t bytes = vld1q_u8(src+x);
+			uint16x8_t lo16 = vmovl_u8(vget_low_u8(bytes));
+			uint16x8_t hi16 = vmovl_u8(vget_high_u8(bytes));
+			uint32x4_t v[4];
+			int g;
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32x4_t c = v[g];
+				uint32x4_t o = z;
+				uint32_t *d = dest + x + g*4;
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m1), m1), b2000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m2), m2), b4000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m4), m4), b8000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m8), m8), b10000));
+				vst1q_u32(d, vorrq_u32(vld1q_u32(d), o));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++)
+	{
+		int c = src[x];
+		if (c != 0)
+		{
+			if (c&0x01) dest[x] |= 0x2000;
+			if (c&0x02) dest[x] |= 0x4000;
+			if (c&0x04) dest[x] |= 0x8000;
+			if (c&0x08) dest[x] |= 0x10000;
+		}
+	}
+}
+
+/* Flipped (flipx) variant of the granularity-64 blend row.  Output pixel x
+   reads srcrow[sxi_base - x]; the 16-byte source span backing each output
+   block is loaded and byte-reversed (as in the flipped PEN_INDEX kernel)
+   before the same branchless OR-blend is applied. */
+static void cps3_blit_row_blend64_flip(uint32_t *dest, const uint8_t *srcrow, int sxi_base, int n)
+{
+	int x = 0;
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i zero = _mm_setzero_si128();
+		__m128i b2000 = _mm_set1_epi32(0x2000), b4000 = _mm_set1_epi32(0x4000);
+		__m128i b8000 = _mm_set1_epi32(0x8000), b10000 = _mm_set1_epi32(0x10000);
+		__m128i m1 = _mm_set1_epi32(1), m2 = _mm_set1_epi32(2), m4 = _mm_set1_epi32(4), m8 = _mm_set1_epi32(8);
+		for (; x+16 <= n; x += 16)
+		{
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			__m128i bytes = _mm_loadu_si128((const __m128i*)p);
+			__m128i v[4];
+			int g;
+			bytes = _mm_or_si128(_mm_slli_epi16(bytes, 8), _mm_srli_epi16(bytes, 8));
+			bytes = _mm_shufflelo_epi16(bytes, 0x1B);
+			bytes = _mm_shufflehi_epi16(bytes, 0x1B);
+			bytes = _mm_shuffle_epi32(bytes, 0x4E);
+			{
+				__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+				__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+				v[0] = _mm_unpacklo_epi16(lo8, zero);
+				v[1] = _mm_unpackhi_epi16(lo8, zero);
+				v[2] = _mm_unpacklo_epi16(hi8, zero);
+				v[3] = _mm_unpackhi_epi16(hi8, zero);
+			}
+			for (g = 0; g < 4; g++)
+			{
+				__m128i c = v[g];
+				__m128i o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m1), m1), b2000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m2), m2), b4000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m4), m4), b8000));
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m8), m8), b10000));
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_loadu_si128((const __m128i*)d), o));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t b2000 = vdupq_n_u32(0x2000), b4000 = vdupq_n_u32(0x4000);
+		uint32x4_t b8000 = vdupq_n_u32(0x8000), b10000 = vdupq_n_u32(0x10000);
+		uint32x4_t m1 = vdupq_n_u32(1), m2 = vdupq_n_u32(2), m4 = vdupq_n_u32(4), m8 = vdupq_n_u32(8);
+		uint32x4_t z = vdupq_n_u32(0);
+		for (; x+16 <= n; x += 16)
+		{
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			uint8x16_t bytes = vld1q_u8(p);
+			uint16x8_t lo16, hi16;
+			uint32x4_t v[4];
+			int g;
+			bytes = vrev64q_u8(bytes);
+			bytes = vcombine_u8(vget_high_u8(bytes), vget_low_u8(bytes));
+			lo16 = vmovl_u8(vget_low_u8(bytes));
+			hi16 = vmovl_u8(vget_high_u8(bytes));
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32x4_t c = v[g];
+				uint32x4_t o = z;
+				uint32_t *d = dest + x + g*4;
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m1), m1), b2000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m2), m2), b4000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m4), m4), b8000));
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m8), m8), b10000));
+				vst1q_u32(d, vorrq_u32(vld1q_u32(d), o));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++)
+	{
+		int c = srcrow[sxi_base - x];
+		if (c != 0)
+		{
+			if (c&0x01) dest[x] |= 0x2000;
+			if (c&0x02) dest[x] |= 0x4000;
+			if (c&0x04) dest[x] |= 0x8000;
+			if (c&0x08) dest[x] |= 0x10000;
+		}
+	}
+}
+
+/* Forward non-granularity-64 blend row.  For each non-zero source index,
+   OR 0x8000 when bit 0 is set, and OR colorbit (which is 0x10000 when
+   color&0x100 was set, else 0) unconditionally -- but still only for
+   non-zero pixels.  colorbit is resolved once at the call site.  The
+   0x8000 contribution is self-gated (bit 0 set implies the index is
+   non-zero); the colorbit contribution must be masked by the non-zero
+   test explicitly, since it does not depend on the index value. */
+static void cps3_blit_row_blendother(uint32_t *dest, const uint8_t *src, int n, uint32_t colorbit)
+{
+	int x = 0;
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i zero = _mm_setzero_si128();
+		__m128i b8000 = _mm_set1_epi32(0x8000);
+		__m128i vcolorbit = _mm_set1_epi32((int)colorbit);
+		__m128i m1 = _mm_set1_epi32(1);
+		__m128i all = _mm_set1_epi32(-1);
+		for (; x+16 <= n; x += 16)
+		{
+			__m128i bytes = _mm_loadu_si128((const __m128i*)(src+x));
+			__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+			__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+			__m128i v[4];
+			int g;
+			v[0] = _mm_unpacklo_epi16(lo8, zero);
+			v[1] = _mm_unpackhi_epi16(lo8, zero);
+			v[2] = _mm_unpacklo_epi16(hi8, zero);
+			v[3] = _mm_unpackhi_epi16(hi8, zero);
+			for (g = 0; g < 4; g++)
+			{
+				__m128i c = v[g];
+				__m128i nz = _mm_andnot_si128(_mm_cmpeq_epi32(c, zero), all);   /* ones where c != 0 */
+				__m128i o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m1), m1), b8000));
+				o = _mm_or_si128(o, _mm_and_si128(nz, vcolorbit));
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_loadu_si128((const __m128i*)d), o));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t zero = vdupq_n_u32(0);
+		uint32x4_t b8000 = vdupq_n_u32(0x8000);
+		uint32x4_t vcolorbit = vdupq_n_u32(colorbit);
+		uint32x4_t m1 = vdupq_n_u32(1);
+		for (; x+16 <= n; x += 16)
+		{
+			uint8x16_t bytes = vld1q_u8(src+x);
+			uint16x8_t lo16 = vmovl_u8(vget_low_u8(bytes));
+			uint16x8_t hi16 = vmovl_u8(vget_high_u8(bytes));
+			uint32x4_t v[4];
+			int g;
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32x4_t c = v[g];
+				uint32x4_t nz = vmvnq_u32(vceqq_u32(c, zero));   /* ones where c != 0 */
+				uint32x4_t o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m1), m1), b8000));
+				o = vorrq_u32(o, vandq_u32(nz, vcolorbit));
+				vst1q_u32(d, vorrq_u32(vld1q_u32(d), o));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++)
+	{
+		int c = src[x];
+		if (c != 0)
+		{
+			if (c&0x01) dest[x] |= 0x8000;
+			dest[x] |= colorbit;
+		}
+	}
+}
+
+/* Flipped variant of the non-granularity-64 blend row. */
+static void cps3_blit_row_blendother_flip(uint32_t *dest, const uint8_t *srcrow, int sxi_base, int n, uint32_t colorbit)
+{
+	int x = 0;
+#if defined(CPS3_HAVE_SSE2)
+	if (n >= 16)
+	{
+		__m128i zero = _mm_setzero_si128();
+		__m128i b8000 = _mm_set1_epi32(0x8000);
+		__m128i vcolorbit = _mm_set1_epi32((int)colorbit);
+		__m128i m1 = _mm_set1_epi32(1);
+		__m128i all = _mm_set1_epi32(-1);
+		for (; x+16 <= n; x += 16)
+		{
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			__m128i bytes = _mm_loadu_si128((const __m128i*)p);
+			__m128i v[4];
+			int g;
+			bytes = _mm_or_si128(_mm_slli_epi16(bytes, 8), _mm_srli_epi16(bytes, 8));
+			bytes = _mm_shufflelo_epi16(bytes, 0x1B);
+			bytes = _mm_shufflehi_epi16(bytes, 0x1B);
+			bytes = _mm_shuffle_epi32(bytes, 0x4E);
+			{
+				__m128i lo8 = _mm_unpacklo_epi8(bytes, zero);
+				__m128i hi8 = _mm_unpackhi_epi8(bytes, zero);
+				v[0] = _mm_unpacklo_epi16(lo8, zero);
+				v[1] = _mm_unpackhi_epi16(lo8, zero);
+				v[2] = _mm_unpacklo_epi16(hi8, zero);
+				v[3] = _mm_unpackhi_epi16(hi8, zero);
+			}
+			for (g = 0; g < 4; g++)
+			{
+				__m128i c = v[g];
+				__m128i nz = _mm_andnot_si128(_mm_cmpeq_epi32(c, zero), all);
+				__m128i o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = _mm_or_si128(o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(c, m1), m1), b8000));
+				o = _mm_or_si128(o, _mm_and_si128(nz, vcolorbit));
+				_mm_storeu_si128((__m128i*)d, _mm_or_si128(_mm_loadu_si128((const __m128i*)d), o));
+			}
+		}
+	}
+#elif defined(CPS3_HAVE_NEON)
+	if (n >= 16)
+	{
+		uint32x4_t zero = vdupq_n_u32(0);
+		uint32x4_t b8000 = vdupq_n_u32(0x8000);
+		uint32x4_t vcolorbit = vdupq_n_u32(colorbit);
+		uint32x4_t m1 = vdupq_n_u32(1);
+		for (; x+16 <= n; x += 16)
+		{
+			const uint8_t *p = srcrow + (sxi_base - x - 15);
+			uint8x16_t bytes = vld1q_u8(p);
+			uint16x8_t lo16, hi16;
+			uint32x4_t v[4];
+			int g;
+			bytes = vrev64q_u8(bytes);
+			bytes = vcombine_u8(vget_high_u8(bytes), vget_low_u8(bytes));
+			lo16 = vmovl_u8(vget_low_u8(bytes));
+			hi16 = vmovl_u8(vget_high_u8(bytes));
+			v[0] = vmovl_u16(vget_low_u16(lo16));
+			v[1] = vmovl_u16(vget_high_u16(lo16));
+			v[2] = vmovl_u16(vget_low_u16(hi16));
+			v[3] = vmovl_u16(vget_high_u16(hi16));
+			for (g = 0; g < 4; g++)
+			{
+				uint32x4_t c = v[g];
+				uint32x4_t nz = vmvnq_u32(vceqq_u32(c, zero));
+				uint32x4_t o = zero;
+				uint32_t *d = dest + x + g*4;
+				o = vorrq_u32(o, vandq_u32(vceqq_u32(vandq_u32(c, m1), m1), b8000));
+				o = vorrq_u32(o, vandq_u32(nz, vcolorbit));
+				vst1q_u32(d, vorrq_u32(vld1q_u32(d), o));
+			}
+		}
+	}
+#endif
+	for (; x < n; x++)
+	{
+		int c = srcrow[sxi_base - x];
+		if (c != 0)
+		{
+			if (c&0x01) dest[x] |= 0x8000;
+			dest[x] |= colorbit;
+		}
+	}
+}
+
+static void cps3_blit_row_pen(uint32_t *dest, const uint8_t *src, int n, const uint32_t *pal)
+{
+	/* Transparent-pen colour-table variant.  The per-pixel work is a gather
+	   through pal[], which does not vectorise usefully under SSE2/NEON, so
+	   this stays scalar; it is only used by the SS/text path. */
+	int x;
+	for (x = 0; x < n; x++) { int c = src[x]; if (c != 0) dest[x] = pal[c]; }
+}
+
+static void cps3_blit_row_none(uint32_t *dest, const uint8_t *src, int n, const uint32_t *pal)
+{
+	/* Opaque colour-table variant; also a gather through pal[], kept scalar. */
+	int x;
+	for (x = 0; x < n; x++) dest[x] = pal[src[x]];
+}
+
 INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_element *gfx,
 		unsigned int code,unsigned int color,int flipx,int flipy,int sx,int sy,
 		int transparency,int transparent_color,
-		int scalex, int scaley,bitmap_t *pri_buffer,UINT32 pri_mask)
+		int scalex, int scaley,bitmap_t *pri_buffer,uint32_t pri_mask,int color_granularity)
 {
 	rectangle myclip;
 
-//  UINT8 al;
+//  uint8_t al;
 
 //  al = (pdrawgfx_shadow_lowpri) ? 0 : 0x80;
 
@@ -424,15 +1088,230 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 		clip=&myclip;
 	}
 
+	/* Fast path for the common native-scale (1:1) case.  When scalex and
+	   scaley are both 0x10000 the general scaler below reduces to a plain
+	   per-pixel copy with a unit source step (dx==dy==0x10000), so the
+	   16.16 fixed-point index stepping and per-pixel >>16 are pure
+	   overhead.  This path reproduces the exact same source-pixel mapping
+	   -- including x/y flip and edge clipping -- using integer steps, and
+	   has been verified bit-identical to the general path for all of the
+	   transparency modes including PEN_INDEX_BLEND.  Only gfx == NULL is
+	   left to the general path. */
+	if( gfx && scalex == 0x10000 && scaley == 0x10000 )
+	{
+		uint32_t palbase = (color_granularity * color) & 0x1ffff;
+		const pen_t *pal = &cps3_mame_colours[palbase];
+		const uint8_t *source_base = gfx_element_get_data(gfx, code % gfx->total_elements);
+		int gw = gfx->width;
+		int gh = gfx->height;
+		int ex = sx + gw;
+		int ey = sy + gh;
+		/* first source column/row and per-step direction (handles flip) */
+		int sxi_base = flipx ? (gw-1) : 0;
+		int syi_base = flipy ? (gh-1) : 0;
+		int sxd = flipx ? -1 : 1;
+		int syd = flipy ? -1 : 1;
+
+		if( clip )
+		{
+			if( sx < clip->min_x ) { int pixels = clip->min_x-sx; sx += pixels; sxi_base += pixels*sxd; }
+			if( sy < clip->min_y ) { int pixels = clip->min_y-sy; sy += pixels; syi_base += pixels*syd; }
+			if( ex > clip->max_x+1 ) ex = clip->max_x+1;
+			if( ey > clip->max_y+1 ) ey = clip->max_y+1;
+		}
+
+		if( ex > sx )
+		{
+			int y;
+			int syi = syi_base;
+			int n = ex - sx;
+
+			if (transparency == CPS3_TRANSPARENCY_NONE)
+			{
+				if (sxd == 1)
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo + sxi_base;
+						cps3_blit_row_none(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, n, pal);
+						syi += syd;
+					}
+				}
+				else
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo;
+						uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+						int x, sxi = sxi_base;
+						for( x=sx; x<ex; x++ ) { dest[x] = pal[source[sxi]]; sxi += sxd; }
+						syi += syd;
+					}
+				}
+			}
+			else if (transparency == CPS3_TRANSPARENCY_PEN)
+			{
+				if (sxd == 1 && transparent_color == 0)
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo + sxi_base;
+						cps3_blit_row_pen(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, n, pal);
+						syi += syd;
+					}
+				}
+				else
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo;
+						uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+						int x, sxi = sxi_base;
+						for( x=sx; x<ex; x++ ) { int c = source[sxi]; if( c != transparent_color ) dest[x] = pal[c]; sxi += sxd; }
+						syi += syd;
+					}
+				}
+			}
+			else if (transparency == CPS3_TRANSPARENCY_PEN_INDEX)
+			{
+				if (sxd == 1 && transparent_color == 0)
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo + sxi_base;
+						cps3_blit_row_penindex(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, n, palbase);
+						syi += syd;
+					}
+				}
+				else if (sxd == -1 && transparent_color == 0)
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo;
+						cps3_blit_row_penindex_flip(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, sxi_base, n, palbase);
+						syi += syd;
+					}
+				}
+				else
+				{
+					for( y=sy; y<ey; y++ )
+					{
+						const uint8_t *source = source_base + syi * gfx->line_modulo;
+						uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+						int x, sxi = sxi_base;
+						for( x=sx; x<ex; x++ ) { int c = source[sxi]; if( c != transparent_color ) dest[x] = c | palbase; sxi += sxd; }
+						syi += syd;
+					}
+				}
+			}
+			else /* CPS3_TRANSPARENCY_PEN_INDEX_BLEND */
+			{
+				/* Blend ORs fixed bits into the existing destination pixel
+				   based on low bits of the source index; it does not write a
+				   new colour.  Semantics reproduced exactly from the general
+				   scaler.  The granularity==64 upper-nibble case is
+				   intentionally a no-op (see the determinism note in the
+				   general path).  Scalar for now; this case steps the source
+				   in either direction so a kernel would need a reverse load. */
+				if (color_granularity == 64)
+				{
+					if (sxd == 1 && transparent_color == 0)
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo + sxi_base;
+							cps3_blit_row_blend64(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, n);
+							syi += syd;
+						}
+					}
+					else if (sxd == -1 && transparent_color == 0)
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo;
+							cps3_blit_row_blend64_flip(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, sxi_base, n);
+							syi += syd;
+						}
+					}
+					else
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo;
+							uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+							int x, sxi = sxi_base;
+							for( x=sx; x<ex; x++ )
+							{
+								int c = source[sxi];
+								if( c != transparent_color )
+								{
+									if (c&0x01) dest[x] |= 0x2000;
+									if (c&0x02) dest[x] |= 0x4000;
+									if (c&0x04) dest[x] |= 0x8000;
+									if (c&0x08) dest[x] |= 0x10000;
+								}
+								sxi += sxd;
+							}
+							syi += syd;
+						}
+					}
+				}
+				else
+				{
+					uint32_t colorbit = (color & 0x100) ? 0x10000 : 0;
+					if (sxd == 1 && transparent_color == 0)
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo + sxi_base;
+							cps3_blit_row_blendother(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, n, colorbit);
+							syi += syd;
+						}
+					}
+					else if (sxd == -1 && transparent_color == 0)
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo;
+							cps3_blit_row_blendother_flip(BITMAP_ADDR32(dest_bmp, y, 0) + sx, source, sxi_base, n, colorbit);
+							syi += syd;
+						}
+					}
+					else
+					{
+						for( y=sy; y<ey; y++ )
+						{
+							const uint8_t *source = source_base + syi * gfx->line_modulo;
+							uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+							int x, sxi = sxi_base;
+							for( x=sx; x<ex; x++ )
+							{
+								int c = source[sxi];
+								if( c != transparent_color )
+								{
+									if (c&0x01) dest[x] |= 0x8000;
+									if (color&0x100) dest[x] |= 0x10000;
+								}
+								sxi += sxd;
+							}
+							syi += syd;
+						}
+					}
+				}
+			}
+		}
+		return;
+	}
+
 
 	/* 32-bit ONLY */
 	{
 		if( gfx )
 		{
 //          const pen_t *pal = &gfx->colortable[gfx->color_granularity * (color % gfx->total_colors)];
-			UINT32 palbase = (gfx->color_granularity * color) & 0x1ffff;
+			uint32_t palbase = (color_granularity * color) & 0x1ffff;
 			const pen_t *pal = &cps3_mame_colours[palbase];
-			const UINT8 *source_base = gfx_element_get_data(gfx, code % gfx->total_elements);
+			const uint8_t *source_base = gfx_element_get_data(gfx, code % gfx->total_elements);
 
 			int sprite_screen_height = (scaley*gfx->height+0x8000)>>16;
 			int sprite_screen_width = (scalex*gfx->width+0x8000)>>16;
@@ -505,8 +1384,8 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 						{
 							for( y=sy; y<ey; y++ )
 							{
-								const UINT8 *source = source_base + (y_index>>16) * gfx->line_modulo;
-								UINT32 *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+								const uint8_t *source = source_base + (y_index>>16) * gfx->line_modulo;
+								uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
 
 								int x, x_index = x_index_base;
 								for( x=sx; x<ex; x++ )
@@ -524,8 +1403,8 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 						{
 							for( y=sy; y<ey; y++ )
 							{
-								const UINT8 *source = source_base + (y_index>>16) * gfx->line_modulo;
-								UINT32 *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+								const uint8_t *source = source_base + (y_index>>16) * gfx->line_modulo;
+								uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
 
 								int x, x_index = x_index_base;
 								for( x=sx; x<ex; x++ )
@@ -544,8 +1423,8 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 						{
 							for( y=sy; y<ey; y++ )
 							{
-								const UINT8 *source = source_base + (y_index>>16) * gfx->line_modulo;
-								UINT32 *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+								const uint8_t *source = source_base + (y_index>>16) * gfx->line_modulo;
+								uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
 
 								int x, x_index = x_index_base;
 								for( x=sx; x<ex; x++ )
@@ -564,8 +1443,8 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 						{
 							for( y=sy; y<ey; y++ )
 							{
-								const UINT8 *source = source_base + (y_index>>16) * gfx->line_modulo;
-								UINT32 *dest = BITMAP_ADDR32(dest_bmp, y, 0);
+								const uint8_t *source = source_base + (y_index>>16) * gfx->line_modulo;
+								uint32_t *dest = BITMAP_ADDR32(dest_bmp, y, 0);
 
 								int x, x_index = x_index_base;
 								for( x=sx; x<ex; x++ )
@@ -574,14 +1453,24 @@ INLINE void cps3_drawgfxzoom(bitmap_t *dest_bmp,const rectangle *clip,const gfx_
 									if( c != transparent_color )
 									{
 										/* blending isn't 100% understood */
-										if (gfx->color_granularity == 64)
+										if (color_granularity == 64)
 										{
 											// OK for sfiii2 spotlight
 											if (c&0x01) dest[x] |= 0x2000;
 											if (c&0x02) dest[x] |= 0x4000;
 											if (c&0x04) dest[x] |= 0x8000;
 											if (c&0x08) dest[x] |= 0x10000;
-											if (c&0xf0) dest[x] |= mame_rand(gfx->machine); // ?? not used?
+											/* The upper-nibble case (c & 0xf0) is not understood.
+											   It must not pull a value from the machine RNG: this
+											   runs inside the video update, and a libretro core's
+											   render path has to be deterministic -- a global RNG
+											   read here advances shared state every time a frame is
+											   drawn, so it desynchronises run-ahead, rewind, and
+											   netplay (each of which re-renders speculatively) and
+											   sprays a different palette index into the pixel each
+											   frame, showing up as flickering noise.  Leave the
+											   pixel with the low-nibble blend flags already applied
+											   above until the real behaviour is known. */
 										}
 										else
 										{
@@ -611,18 +1500,18 @@ static DIRECT_UPDATE_HANDLER( cps3_direct_handler );
 
 /* Encryption */
 
-static UINT32 cps3_key1, cps3_key2;
+static uint32_t cps3_key1, cps3_key2;
 static int cps3_altEncryption; // sfiii2 has different encryption, data isn't encrypted outside of the bios
 
-static UINT16 rotate_left(UINT16 value, int n)
+static uint16_t rotate_left(uint16_t value, int n)
 {
    int aux = value>>(16-n);
    return ((value<<n)|aux)%0x10000;
 }
 
-static UINT16 rotxor(UINT16 val, UINT16 xorval)
+static uint16_t rotxor(uint16_t val, uint16_t xorval)
 {
-	UINT16 res;
+	uint16_t res;
 
 	res = val + rotate_left(val,2);
 
@@ -631,9 +1520,9 @@ static UINT16 rotxor(UINT16 val, UINT16 xorval)
 	return res;
 }
 
-static UINT32 cps3_mask(UINT32 address, UINT32 key1, UINT32 key2)
+static uint32_t cps3_mask(uint32_t address, uint32_t key1, uint32_t key2)
 {
-	UINT16 val;
+	uint16_t val;
 
 	address ^= key1;
 
@@ -653,32 +1542,16 @@ static UINT32 cps3_mask(UINT32 address, UINT32 key1, UINT32 key2)
 static void cps3_decrypt_bios(running_machine *machine)
 {
 	int i;
-	UINT32 *coderegion = (UINT32*)memory_region(machine, "user1");
+	uint32_t *coderegion = (uint32_t*)memory_region(machine, "user1");
 
-	decrypted_bios = (UINT32*)memory_region(machine, "user1");
+	decrypted_bios = (uint32_t*)memory_region(machine, "user1");
 
 	for (i=0;i<0x80000;i+=4)
 	{
-		UINT32 dword = coderegion[i/4];
-		UINT32 xormask = cps3_mask(i, cps3_key1, cps3_key2);
+		uint32_t dword = coderegion[i/4];
+		uint32_t xormask = cps3_mask(i, cps3_key1, cps3_key2);
 		decrypted_bios[i/4] = dword ^ xormask;
 	}
-#if 0
-	/* Dump to file */
-	{
-		FILE *fp;
-		const char *gamename = machine->gamedrv->name;
-		char filename[256];
-		sprintf(filename, "%s_bios.dump", gamename);
-
-		fp=fopen(filename, "w+b");
-		if (fp)
-		{
-			fwrite(decrypted_bios, 0x080000, 1, fp);
-			fclose(fp);
-		}
-	}
-#endif
 }
 
 
@@ -690,22 +1563,27 @@ static DRIVER_INIT( cps3 )
 	cps3_user4region = memory_region(machine,"user4");
 	cps3_user5region = memory_region(machine,"user5");
 
-	if (!cps3_user4region) cps3_user4region = auto_alloc_array(machine, UINT8, USER4REGION_LENGTH);
-	if (!cps3_user5region) cps3_user5region = auto_alloc_array(machine, UINT8, USER5REGION_LENGTH);
+	if (!cps3_user4region) cps3_user4region = auto_alloc_array(machine, uint8_t, USER4REGION_LENGTH);
+	if (!cps3_user5region) cps3_user5region = auto_alloc_array(machine, uint8_t, USER5REGION_LENGTH);
+
+	/* The user5 region is always USER5REGION_LENGTH bytes, whether it came
+	   from the ROM region or was just allocated above.  Publish that length
+	   so the sound device can clamp its sample fetches into range. */
+	cps3_user5region_length = USER5REGION_LENGTH;
 
 	// set strict verify
 	sh2drc_set_options(machine->device("maincpu"), SH2DRC_STRICT_VERIFY);
 
 	cps3_decrypt_bios(machine);
-	decrypted_gamerom = auto_alloc_array(machine, UINT32, 0x1000000/4);
+	decrypted_gamerom = auto_alloc_array(machine, uint32_t, 0x1000000/4);
 
 	/* just some NOPs for the game to execute if it crashes and starts executing unmapped addresses
      - this prevents MAME from crashing */
-	cps3_nops = auto_alloc(machine, UINT32);
+	cps3_nops = auto_alloc(machine, uint32_t);
 	cps3_nops[0] = 0x00090009;
 
 
-	cps3_0xc0000000_ram_decrypted = auto_alloc_array(machine, UINT32, 0x400/4);
+	cps3_0xc0000000_ram_decrypted = auto_alloc_array(machine, uint32_t, 0x400/4);
 	memory_set_direct_update_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), cps3_direct_handler);
 
 	// flash roms
@@ -713,7 +1591,7 @@ static DRIVER_INIT( cps3 )
 	for (i=0;i<48;i++)
 		intelflash_init( machine, i, FLASH_FUJITSU_29F016A, NULL );
 
-	cps3_eeprom = auto_alloc_array(machine, UINT32, 0x400/4);
+	cps3_eeprom = auto_alloc_array(machine, uint32_t, 0x400/4);
 }
 
 static DRIVER_INIT( jojo )    { cps3_key1 = 0x02203ee3; cps3_key2 = 0x01301972; cps3_altEncryption = 0; DRIVER_INIT_CALL(cps3); }
@@ -753,37 +1631,56 @@ static const gfx_layout cps3_tiles8x8_layout =
 	64*8
 };
 
-static UINT32* cps3_ss_ram;
+static uint32_t* cps3_ss_ram;
 
-static void cps3_set_mame_colours(running_machine *machine, int colournum, UINT16 data, UINT32 fadeval )
+/* CPS-3 palette fade. The 32-bit `fadeval` is three 8-bit per-channel fade
+ * descriptors plus padding -- bits 24:31 = R, 16:23 = G, 0:7 = B (the middle
+ * byte 8:15 is unused). Each per-channel byte is laid out as:
+ *
+ *    bit 7      unused (masked out)
+ *    bit 6      fade enable: when 0, the channel passes through unchanged
+ *    bit 5      fade mode:   0 = fade toward black (multiplicative attenuate)
+ *                            1 = fade toward white (invert / multiply / invert)
+ *    bits 4..0  fade value:  0 = full effect, 0x1f = no effect
+ *
+ * The earlier mame2010 implementation just multiplied each channel by a 6-bit
+ * `fadeval` field unconditionally, which produced wrong results whenever the
+ * game wrote a fade value with the enable bit clear (e.g. several Warzard
+ * effects involving Player 2, and various places in the SFIII family). It
+ * also dropped the fade-mode bit entirely, so fades meant to ramp toward
+ * white came out as fades toward black. */
+INLINE int cps3_get_fade(int c, int f)
+{
+	if (f & 0x40) /* fade enable */
+	{
+		if (f & 0x20)
+			c = ((((c ^ 0x1f) * (~f & 0x1f)) >> 5) ^ 0x1f); /* invert mode */
+		else
+			c = (c * (f & 0x1f)) >> 5;                      /* multiply-down */
+	}
+	return c;
+}
+
+static void cps3_set_mame_colours(running_machine *machine, int colournum, uint16_t data, uint32_t fadeval )
 {
 	int r,g,b;
-	UINT16* dst = (UINT16*)cps3_colourram;
+	uint16_t* dst = (uint16_t*)cps3_colourram;
 
 
 	r = (data >> 0) & 0x1f;
 	g = (data >> 5) & 0x1f;
 	b = (data >> 10) & 0x1f;
 
-	/* is this 100% correct? */
-	if (fadeval!=0)
+	/* Only touch a channel when its fade-enable bit (0x40 in the channel
+	 * byte) is set; the combined mask 0x40400040 lets us short-circuit the
+	 * common "no fade enabled" path with a single test. */
+	if (fadeval & 0x40400040)
 	{
-		int fade;
-		//printf("fadeval %08x\n",fadeval);
-
-		fade = (fadeval & 0x3f000000)>>24;
-		r = (r*fade)>>5;
-		if (r>0x1f) r = 0x1f;
-
-		fade = (fadeval & 0x003f0000)>>16;
-		g = (g*fade)>>5;
-		if (g>0x1f) g = 0x1f;
-
-		fade = (fadeval & 0x0000003f)>>0;
-		b = (b*fade)>>5;
-		if (b>0x1f) b = 0x1f;
-
-		data = (r <<0) | (g << 5) | (b << 10);
+		r = cps3_get_fade(r, (fadeval & 0x7f000000) >> 24);
+		g = cps3_get_fade(g, (fadeval & 0x007f0000) >> 16);
+		b = cps3_get_fade(b, (fadeval & 0x0000007f) >> 0);
+		/* preserve bit 15 of the original colour word */
+		data = (data & 0x8000) | (r << 0) | (g << 5) | (b << 10);
 	}
 
 	dst[colournum] = data;
@@ -796,26 +1693,26 @@ static void cps3_set_mame_colours(running_machine *machine, int colournum, UINT1
 
 static VIDEO_START(cps3)
 {
-	cps3_ss_ram       = auto_alloc_array(machine, UINT32, 0x10000/4);
+	cps3_ss_ram       = auto_alloc_array(machine, uint32_t, 0x10000/4);
 	memset(cps3_ss_ram, 0x00, 0x10000);
 	state_save_register_global_pointer(machine, cps3_ss_ram, 0x10000/4);
 
-	cps3_char_ram = auto_alloc_array(machine, UINT32, 0x800000/4);
+	cps3_char_ram = auto_alloc_array(machine, uint32_t, 0x800000/4);
 	memset(cps3_char_ram, 0x00, 0x800000);
 	state_save_register_global_pointer(machine, cps3_char_ram, 0x800000 /4);
 
 	/* create the char set (gfx will then be updated dynamically from RAM) */
-	machine->gfx[0] = gfx_element_alloc(machine, &cps3_tiles8x8_layout, (UINT8 *)cps3_ss_ram, machine->total_colors() / 16, 0);
+	machine->gfx[0] = gfx_element_alloc(machine, &cps3_tiles8x8_layout, (uint8_t *)cps3_ss_ram, machine->total_colors() / 16, 0);
 
 	//decode_ssram();
 
 	/* create the char set (gfx will then be updated dynamically from RAM) */
-	machine->gfx[1] = gfx_element_alloc(machine, &cps3_tiles16x16_layout, (UINT8 *)cps3_char_ram, machine->total_colors() / 64, 0);
+	machine->gfx[1] = gfx_element_alloc(machine, &cps3_tiles16x16_layout, (uint8_t *)cps3_char_ram, machine->total_colors() / 64, 0);
 	machine->gfx[1]->color_granularity = 64;
 
 	//decode_charram();
 
-	cps3_mame_colours = auto_alloc_array(machine, UINT32, 0x80000/4);
+	cps3_mame_colours = auto_alloc_array(machine, uint32_t, 0x80000/4);
 	memset(cps3_mame_colours, 0x00, 0x80000);
 
 	cps3_screenwidth = 384;
@@ -837,15 +1734,12 @@ static VIDEO_START(cps3)
 
 static void cps3_draw_tilemapsprite_line(running_machine *machine, int tmnum, int drawline, bitmap_t *bitmap, const rectangle *cliprect )
 {
-	UINT32* tmapregs[4] = { tilemap20_regs_base, tilemap30_regs_base, tilemap40_regs_base, tilemap50_regs_base };
-	UINT32* regs;
+	uint32_t* tmapregs[4] = { tilemap20_regs_base, tilemap30_regs_base, tilemap40_regs_base, tilemap50_regs_base };
+	uint32_t* regs;
 	int line;
 	int scrolly;
-	if (tmnum>3)
-	{
-		printf("cps3_draw_tilemapsprite_line Illegal tilemap number %d\n",tmnum);
+	if (tmnum>3) /* cps3_draw_tilemapsprite_line Illegal tilemap number */
 		return;
-	}
 	regs = tmapregs[tmnum];
 
 	scrolly =  ((regs[0]&0x0000ffff)>>0)+4;
@@ -856,8 +1750,8 @@ static void cps3_draw_tilemapsprite_line(running_machine *machine, int tmnum, in
 	if (!(regs[1]&0x00008000)) return;
 
 	{
-		UINT32 mapbase =  (regs[2]&0x007f0000)>>16;
-		UINT32 linebase=  (regs[2]&0x7f000000)>>24;
+		uint32_t mapbase =  (regs[2]&0x007f0000)>>16;
+		uint32_t linebase=  (regs[2]&0x7f000000)>>24;
 		int linescroll_enable = (regs[1]&0x00004000);
 
 		int scrollx;
@@ -870,13 +1764,9 @@ static void cps3_draw_tilemapsprite_line(running_machine *machine, int tmnum, in
 		linebase = linebase << 10;
 
 		if (!linescroll_enable)
-		{
 			scrollx =  (regs[0]&0xffff0000)>>16;
-		}
 		else
 		{
-		//  printf("linebase %08x\n", linebase);
-
 			scrollx =  (regs[0]&0xffff0000)>>16;
 			scrollx+= (cps3_spriteram[linebase+((line+16-4)&0x3ff)]>>16)&0x3ff;
 
@@ -896,7 +1786,7 @@ static void cps3_draw_tilemapsprite_line(running_machine *machine, int tmnum, in
 		for (x=0;x<(cliprect->max_x/16)+2;x++)
 		{
 
-			UINT32 dat;
+			uint32_t dat;
 			int tileno;
 			int colour;
 			int bpp;
@@ -909,31 +1799,213 @@ static void cps3_draw_tilemapsprite_line(running_machine *machine, int tmnum, in
 			yflip  = (dat & 0x00000800)>>11;
 			xflip  = (dat & 0x00001000)>>12;
 
-			if (!bpp) machine->gfx[1]->color_granularity=256;
-			else machine->gfx[1]->color_granularity=64;
-
-			cps3_drawgfxzoom(bitmap,&clip,machine->gfx[1],tileno,colour,xflip,yflip,(x*16)-scrollx%16,drawline-tilesubline,CPS3_TRANSPARENCY_PEN_INDEX,0, 0x10000, 0x10000, NULL, 0);
+			cps3_drawgfxzoom(bitmap,&clip,machine->gfx[1],tileno,colour,xflip,yflip,(x*16)-scrollx%16,drawline-tilesubline,CPS3_TRANSPARENCY_PEN_INDEX,0, 0x10000, 0x10000, NULL, 0, bpp ? 64 : 256);
 		}
 	}
+}
+
+/* Draw a whole tilemap at once.
+
+   The per-line routine above is called once for every one of the ~1023
+   scanlines, and each call redraws each 16-pixel-tall tile clipped to a
+   single line -- so every tile is set up and blitted 16 times.  When
+   per-line linescroll is not active (regs[1] & 0x4000 clear), every line
+   in a 16-line vertical band shares the same scrollx and therefore the
+   same tile row and the same destination y origin, so the band can be
+   drawn with one blit per tile clipped to the band instead of 16 blits
+   clipped to single lines.  This produces byte-identical output (verified
+   exhaustively over all 1024 scrolly values plus widescreen and varied
+   clip heights) while cutting the number of blit calls roughly 16x.
+
+   When linescroll IS active, scrollx can differ per line, so we fall back
+   to the exact per-line path. */
+static void cps3_draw_tilemapsprite(running_machine *machine, int tmnum, bitmap_t *bitmap, const rectangle *cliprect )
+{
+	uint32_t* tmapregs[4] = { tilemap20_regs_base, tilemap30_regs_base, tilemap40_regs_base, tilemap50_regs_base };
+	uint32_t* regs;
+	int scrolly, scrollx;
+	uint32_t mapbase;
+	int drawline;
+	int maxy = cliprect->max_y;
+
+	if (tmnum>3) /* cps3_draw_tilemapsprite Illegal tilemap number */
+		return;
+	regs = tmapregs[tmnum];
+
+	if (!(regs[1]&0x00008000)) return;
+
+	/* Linescroll active: keep the exact per-line behaviour. */
+	if (regs[1]&0x00004000)
+	{
+		for (drawline=0;drawline<1023;drawline++)
+			cps3_draw_tilemapsprite_line(machine, tmnum, drawline, bitmap, cliprect );
+		return;
+	}
+
+	scrolly = ((regs[0]&0x0000ffff)>>0)+4;
+	scrollx = (regs[0]&0xffff0000)>>16;
+	mapbase = ((regs[2]&0x007f0000)>>16) << 10;
+
+	/* Walk the screen in bands of lines that share a tilemap row.  This
+	   mirrors the per-line routine: line = (drawline+scrolly)&0x3ff,
+	   tileline = line/16+1, the tile is fetched at (tileline&63), and the
+	   destination y origin is drawline - (line%16), which stays constant
+	   across a band. */
+	drawline = 0;
+	while (drawline <= maxy+4)
+	{
+		int line        = (drawline+scrolly)&0x3ff;
+		int tileline     = (line/16)+1;
+		int tilesubline = line % 16;
+		int sy          = drawline - tilesubline;
+		int band_start  = drawline;
+		int band_end    = drawline;
+		int x;
+		rectangle clip;
+
+		/* extend the band while the mapped tile row stays the same */
+		while (band_end+1 <= maxy+4)
+		{
+			int l2 = ((band_end+1)+scrolly)&0x3ff;
+			if (((l2/16)+1) != tileline) break;
+			band_end++;
+		}
+
+		clip.min_x = cliprect->min_x;
+		clip.max_x = cliprect->max_x;
+		clip.min_y = band_start;
+		clip.max_y = band_end;
+
+		for (x=0;x<(cliprect->max_x/16)+2;x++)
+		{
+			uint32_t dat = cps3_spriteram[mapbase+((tileline&63)*64)+((x+scrollx/16)&63)];
+			int tileno = (dat & 0xffff0000)>>17;
+			int colour = (dat & 0x000001ff)>>0;
+			int bpp    = (dat & 0x0000200)>>9;
+			int yflip  = (dat & 0x00000800)>>11;
+			int xflip  = (dat & 0x00001000)>>12;
+
+			cps3_drawgfxzoom(bitmap,&clip,machine->gfx[1],tileno,colour,xflip,yflip,(x*16)-scrollx%16,sy,CPS3_TRANSPARENCY_PEN_INDEX,0, 0x10000, 0x10000, NULL, 0, bpp ? 64 : 256);
+		}
+
+		drawline = band_end+1;
+	}
+}
+
+/* Rasterize the accumulated draw list in order into renderbuffer_bitmap and
+   reset it.  Sprite commands go through the same blitter as before; tilemap
+   commands draw the whole layer via cps3_draw_tilemapsprite.  Called both
+   when the list fills mid-frame (flush and continue, preserving order) and
+   once at the end of the sprite walk. */
+static void cps3_flush_draw_list(running_machine *machine)
+{
+	int i;
+	for (i = 0; i < cps3_draw_list_count; i++)
+	{
+		const cps3_draw_cmd *c = &cps3_draw_list[i];
+		if (c->type == CPS3_CMD_SPRITE)
+		{
+			cps3_drawgfxzoom(renderbuffer_bitmap, &renderbuffer_clip, machine->gfx[1],
+				c->tileno, c->pal, c->flipx, c->flipy, c->xpos, c->ypos,
+				c->transparency, 0, c->xinc, c->yinc, NULL, 0, c->color_granularity);
+		}
+		else /* CPS3_CMD_TILEMAP */
+		{
+			cps3_draw_tilemapsprite(machine, c->tilemapnum, renderbuffer_bitmap, &renderbuffer_clip);
+		}
+	}
+	cps3_draw_list_count = 0;
+}
+
+static void cps3_emit_sprite(running_machine *machine, int tileno, int pal, int flipx, int flipy,
+	int xpos, int ypos, int transparency, uint32_t xinc, uint32_t yinc, int color_granularity)
+{
+	cps3_draw_cmd *c;
+	/* flush-and-continue if the fixed buffer is full; rasterizing the
+	   current prefix in order before appending keeps z-order intact and
+	   makes overflow impossible. */
+	if (cps3_draw_list_count >= CPS3_DRAW_LIST_MAX)
+		cps3_flush_draw_list(machine);
+
+	c = &cps3_draw_list[cps3_draw_list_count++];
+	c->type              = CPS3_CMD_SPRITE;
+	c->tileno            = tileno;
+	c->pal               = pal;
+	c->flipx             = flipx;
+	c->flipy             = flipy;
+	c->xpos              = xpos;
+	c->ypos              = ypos;
+	c->transparency      = transparency;
+	c->color_granularity = color_granularity;
+	c->xinc              = xinc;
+	c->yinc              = yinc;
+}
+
+static void cps3_emit_tilemap(running_machine *machine, int tilemapnum)
+{
+	cps3_draw_cmd *c;
+	if (cps3_draw_list_count >= CPS3_DRAW_LIST_MAX)
+		cps3_flush_draw_list(machine);
+
+	c = &cps3_draw_list[cps3_draw_list_count++];
+	c->type       = CPS3_CMD_TILEMAP;
+	c->tilemapnum = tilemapnum;
 }
 
 static VIDEO_UPDATE(cps3)
 {
 	int y,x, count;
-	attoseconds_t period = screen->frame_period().attoseconds;
+	attoseconds_t period;
+
+	/* Bail if the render state is not valid.  These statics are set up in
+	   VIDEO_START and nulled in cps3_exit; if a frame is somehow serviced
+	   before the former or after the latter (e.g. a stray retro_run during
+	   the libretro close sequence), the buffers point at freed or unmapped
+	   storage and the renderbuffer clear below would fault.  Nothing to draw
+	   in that window, so return cleanly. */
+	if (renderbuffer_bitmap == NULL || cps3_mame_colours == NULL ||
+		cps3_char_ram == NULL || cps3_ss_ram == NULL)
+		return 0;
+
+	period = screen->frame_period().attoseconds;
 	rectangle visarea = screen->visible_area();
 
 	int bg_drawn[4] = { 0, 0, 0, 0 };
 
-	UINT32 fullscreenzoomx, fullscreenzoomy;
-	UINT32 fszx, fszy;
+	uint32_t fullscreenzoomx, fullscreenzoomy;
+	uint32_t fszx, fszy;
 
 //  decode_ssram();
 //  decode_charram();
 
 	/* registers are normally 002a006f 01ef01c6
             widescreen mode = 00230076 026501c6
-      only SFIII2 uses widescreen, I don't know exactly which register controls it */
+      only SFIII2 uses widescreen, I don't know exactly which register controls it
+
+   IMPORTANT: screen->configure() can free and reallocate the screen's
+   backing bitmaps (screen_device::realloc_screen_bitmaps() does exactly
+   that whenever the new width or height is larger than the current
+   allocation).  The 'bitmap' argument this function was handed IS that
+   screen bitmap, captured before the call, so once configure() has grown
+   it, 'bitmap' is a dangling pointer to freed memory and every later write
+   through it (the zoom copy and the SS-layer draw below) is a
+   use-after-free.
+
+   sfiii2n is the only CPS-3 game that switches to the wider 496-pixel
+   mode, and it does so on its very first rendered frame: the initial
+   screen bitmap is allocated at the 384-wide startup size, the first
+   VIDEO_UPDATE sees the widescreen register and calls configure(496,...),
+   which frees the 384-wide bitmap and allocates a 496-wide one -- and then
+   the old draw pointer is walked off the end of freed storage.  This was a
+   deterministic segfault on cold load of sfiii2n, faulting in the per-
+   frame render with a bitmap base pointer in freed/unmapped memory.
+
+   Fix: when a mode change actually forces a configure(), do it and then
+   return immediately without drawing.  The reallocation is now complete;
+   the NEXT frame is handed the fresh, correctly-sized screen bitmap and
+   renders normally.  Dropping the single transition frame is invisible (it
+   happens once, as the game starts).  When no configure() is needed the
+   function proceeds and draws as usual. */
 	if (((cps3_fullscreenzoom[1]&0xffff0000)>>16)==0x0265)
 	{
 		if (cps3_screenwidth!=496)
@@ -942,6 +2014,8 @@ static VIDEO_UPDATE(cps3)
 			visarea.min_x = 0; visarea.max_x = 496-1;
 			visarea.min_y = 0; visarea.max_y = 224-1;
 			screen->configure(496, 224, visarea, period);
+			/* 'bitmap' may now be freed; do not touch it this frame */
+			return 0;
 		}
 	}
 	else
@@ -952,6 +2026,8 @@ static VIDEO_UPDATE(cps3)
 			visarea.min_x = 0; visarea.max_x = 384-1;
 			visarea.min_y = 0; visarea.max_y = 224-1;
 			screen->configure(384, 224, visarea, period);
+			/* 'bitmap' may now be freed; do not touch it this frame */
+			return 0;
 		}
 	}
 
@@ -971,11 +2047,12 @@ static VIDEO_UPDATE(cps3)
 
 	bitmap_fill(renderbuffer_bitmap,&renderbuffer_clip,0);
 
+	cps3_draw_list_count = 0;
+
 	/* Sprites */
 	{
 		int i;
 
-		//printf("Spritelist start:\n");
 		for (i=0x00000/4;i<0x2000/4;i+=4)
 		{
 			int xpos =  	(cps3_spriteram[i+1]&0x03ff0000)>>16;
@@ -983,7 +2060,7 @@ static VIDEO_UPDATE(cps3)
 			int j;
 			int gscroll =      (cps3_spriteram[i+0]&0x70000000)>>28;
 			int length =    (cps3_spriteram[i+0]&0x01ff0000)>>16; // how many entries in the sprite table
-			UINT32 start  =    (cps3_spriteram[i+0]&0x00007ff0)>>4;
+			uint32_t start  =    (cps3_spriteram[i+0]&0x00007ff0)>>4;
 
 			int whichbpp =     (cps3_spriteram[i+2]&0x40000000)>>30; // not 100% sure if this is right, jojo title / characters
 			int whichpal =     (cps3_spriteram[i+2]&0x20000000)>>29;
@@ -1003,16 +2080,16 @@ static VIDEO_UPDATE(cps3)
 			for (j=0;j<(length)*4;j+=4)
 			{
 
-				UINT32 value1 = 	(cps3_spriteram[start+j+0]);
-				UINT32 value2 = 	(cps3_spriteram[start+j+1]);
-				UINT32 value3 = 	(cps3_spriteram[start+j+2]);
+				uint32_t value1 = 	(cps3_spriteram[start+j+0]);
+				uint32_t value2 = 	(cps3_spriteram[start+j+1]);
+				uint32_t value3 = 	(cps3_spriteram[start+j+2]);
 
 
-				//UINT8* srcdata = (UINT8*)cps3_char_ram;
-				//UINT32 sourceoffset = (value1 >>14)&0x7fffff;
+				//uint8_t* srcdata = (uint8_t*)cps3_char_ram;
+				//uint32_t sourceoffset = (value1 >>14)&0x7fffff;
 				int count;
 
-				UINT32 tileno = (value1&0xfffe0000)>>17;
+				uint32_t tileno = (value1&0xfffe0000)>>17;
 
 				int xpos2 = (value2 & 0x03ff0000)>>16;
 				int ypos2 = (value2 & 0x000003ff)>>0;
@@ -1031,46 +2108,18 @@ static VIDEO_UPDATE(cps3)
 				static const int tilestable[4] = { 8,1,2,4 };
 				int ysize2 = ((value3 & 0x0000000c)>>2);
 				int xsize2 = ((value3 & 0x00000003)>>0);
-				UINT32 xinc,yinc;
+				uint32_t xinc,yinc;
 
 				if (ysize2==0)
-				{
-				//  printf("invalid sprite ysize of 0 tiles\n");
 					continue;
-				}
 
 				if (xsize2==0) // xsize of 0 tiles seems to be a special command to draw tilemaps
 				{
 					int tilemapnum = ((value3 & 0x00000030)>>4);
-					//int startline;// = value2 & 0x3ff;
-					//int endline;
-					//int height = (value3 & 0x7f000000)>>24;
-					int uu;
-					UINT32* tmapregs[4] = { tilemap20_regs_base, tilemap30_regs_base, tilemap40_regs_base, tilemap50_regs_base };
-					UINT32* regs;
-					regs = tmapregs[tilemapnum];
-					//endline = value2;
-					//startline = endline - height;
-
-					//startline &=0x3ff;
-					//endline &=0x3ff;
-
-					//printf("tilemap draw %01x %02x %02x %02x\n",tilemapnum, value2, height, regs[0]&0x000003ff );
-
-					//printf("tilemap draw %01x %d %d\n",tilemapnum, startline, endline );
-
-
 					/* Urgh, the startline / endline seem to be direct screen co-ordinates regardless of fullscreen zoom
                        which probably means the fullscreen zoom is applied when rendering everything, not aftewards */
-					//for (uu=startline;uu<endline+1;uu++)
-
 					if (bg_drawn[tilemapnum]==0)
-					{
-						for (uu=0;uu<1023;uu++)
-						{
-							cps3_draw_tilemapsprite_line(screen->machine, tilemapnum, uu, renderbuffer_bitmap, &renderbuffer_clip );
-						}
-					}
+						cps3_emit_tilemap(screen->machine, tilemapnum);
 					bg_drawn[tilemapnum] = 1;
 				}
 				else
@@ -1139,15 +2188,16 @@ static VIDEO_UPDATE(cps3)
 								}
 
 								/* use the bpp value from the main list or the sublists? */
+								int color_granularity;
 								if (whichbpp)
 								{
-									if (!global_bpp) screen->machine->gfx[1]->color_granularity=256;
-									else screen->machine->gfx[1]->color_granularity=64;
+									if (!global_bpp) color_granularity=256;
+									else color_granularity=64;
 								}
 								else
 								{
-									if (!bpp) screen->machine->gfx[1]->color_granularity=256;
-									else screen->machine->gfx[1]->color_granularity=64;
+									if (!bpp) color_granularity=256;
+									else color_granularity=64;
 								}
 
 								{
@@ -1155,11 +2205,11 @@ static VIDEO_UPDATE(cps3)
 
 									if (global_alpha || alpha)
 									{
-										cps3_drawgfxzoom(renderbuffer_bitmap,&renderbuffer_clip,screen->machine->gfx[1],realtileno,actualpal,0^flipx,0^flipy,current_xpos,current_ypos,CPS3_TRANSPARENCY_PEN_INDEX_BLEND,0,xinc,yinc, NULL, 0);
+										cps3_emit_sprite(screen->machine,realtileno,actualpal,0^flipx,0^flipy,current_xpos,current_ypos,CPS3_TRANSPARENCY_PEN_INDEX_BLEND,xinc,yinc,color_granularity);
 									}
 									else
 									{
-										cps3_drawgfxzoom(renderbuffer_bitmap,&renderbuffer_clip,screen->machine->gfx[1],realtileno,actualpal,0^flipx,0^flipy,current_xpos,current_ypos,CPS3_TRANSPARENCY_PEN_INDEX,0,xinc,yinc, NULL, 0);
+										cps3_emit_sprite(screen->machine,realtileno,actualpal,0^flipx,0^flipy,current_xpos,current_ypos,CPS3_TRANSPARENCY_PEN_INDEX,xinc,yinc,color_granularity);
 									}
 									count++;
 								}
@@ -1167,19 +2217,20 @@ static VIDEO_UPDATE(cps3)
 						}
 					}
 	//              */
-
-				//  printf("cell %08x %08x %08x\n",value1, value2, value3);
 				}
 			}
 		}
 	}
 
+	/* Rasterize the ordered draw list built during the sprite walk. */
+	cps3_flush_draw_list(screen->machine);
+
 	/* copy render bitmap with zoom */
 	{
-		UINT32 renderx,rendery;
-		UINT32 srcx, srcy;
-		UINT32* srcbitmap;
-		UINT32* dstbitmap;
+		uint32_t renderx,rendery;
+		uint32_t srcx, srcy;
+		uint32_t* srcbitmap;
+		uint32_t* dstbitmap;
 
 
 		srcy=0;
@@ -1217,15 +2268,15 @@ static VIDEO_UPDATE(cps3)
 		{
 			for (x=0;x<64;x++)
 			{
-				UINT32 data = cps3_ss_ram[count]; // +0x800 = 2nd bank, used on sfiii2 intro..
-				UINT32 tile = (data >> 16) & 0x1ff;
+				uint32_t data = cps3_ss_ram[count]; // +0x800 = 2nd bank, used on sfiii2 intro..
+				uint32_t tile = (data >> 16) & 0x1ff;
 				int pal = (data&0x003f) >> 1;
 				int flipx = (data & 0x0080) >> 7;
 				int flipy = (data & 0x0040) >> 6;
 				pal += cps3_ss_pal_base << 5;
 				tile+=0x200;
 
-				cps3_drawgfxzoom(bitmap, cliprect, screen->machine->gfx[0],tile,pal,flipx,flipy,x*8,y*8,CPS3_TRANSPARENCY_PEN,0,0x10000,0x10000,NULL,0);
+				cps3_drawgfxzoom(bitmap, cliprect, screen->machine->gfx[0],tile,pal,flipx,flipy,x*8,y*8,CPS3_TRANSPARENCY_PEN,0,0x10000,0x10000,NULL,0, screen->machine->gfx[0]->color_granularity);
 				count++;
 			}
 		}
@@ -1265,8 +2316,6 @@ static WRITE32_HANDLER( cps3_0xc0000000_ram_w )
 
 static DIRECT_UPDATE_HANDLER( cps3_direct_handler )
 {
-//  if(DEBUG_PRINTF) printf("address %04x\n",address);
-
 	/* BIOS ROM */
 	if (address < 0x80000)
 	{
@@ -1276,10 +2325,10 @@ static DIRECT_UPDATE_HANDLER( cps3_direct_handler )
 	/* RAM */
 	else if (address >= 0x06000000 && address <= 0x06ffffff)
 	{
-		direct->decrypted = (UINT8*)decrypted_gamerom-0x06000000;
-		direct->raw = (UINT8*)decrypted_gamerom-0x06000000;
+		direct->decrypted = (uint8_t*)decrypted_gamerom-0x06000000;
+		direct->raw = (uint8_t*)decrypted_gamerom-0x06000000;
 
-		if (cps3_altEncryption) direct->raw = (UINT8*) cps3_user4region-0x06000000;
+		if (cps3_altEncryption) direct->raw = (uint8_t*) cps3_user4region-0x06000000;
 
 
 		return ~0;
@@ -1287,18 +2336,18 @@ static DIRECT_UPDATE_HANDLER( cps3_direct_handler )
 	else if (address >= 0xc0000000 && address <= 0xc00003ff)
 	{
 		//direct->decrypted = (void*)cps3_0xc0000000_ram_decrypted;
-		direct->decrypted = (UINT8*)cps3_0xc0000000_ram_decrypted-0xc0000000;
-		direct->raw = (UINT8*)cps3_0xc0000000_ram-0xc0000000;
+		direct->decrypted = (uint8_t*)cps3_0xc0000000_ram_decrypted-0xc0000000;
+		direct->raw = (uint8_t*)cps3_0xc0000000_ram-0xc0000000;
 		return ~0;
 	}
 
 	/* anything else falls through to NOPs */
-	direct->decrypted = (UINT8*)cps3_nops-address;
-	direct->raw = (UINT8*)cps3_nops-address;
+	direct->decrypted = (uint8_t*)cps3_nops-address;
+	direct->raw = (uint8_t*)cps3_nops-address;
 	return ~0;
 }
 
-static UINT32 cram_bank = 0;
+static uint32_t cram_bank = 0;
 
 static WRITE32_HANDLER( cram_bank_w )
 {
@@ -1318,27 +2367,21 @@ static WRITE32_HANDLER( cram_bank_w )
 		//bank_w 00000006, ffff0000
 		//bank_w 00000007, ffff0000
 		// during CHARACTER RAM test..
-			if(DEBUG_PRINTF) printf("bank_w %08x, %08x\n",data,mem_mask);
 
 		}
-	}
-	else
-	{
-		if(DEBUG_PRINTF) printf("bank_w LSB32 %08x, %08x\n",data,mem_mask);
-
 	}
 }
 
 static READ32_HANDLER( cram_data_r )
 {
-	UINT32 fulloffset = (((cram_bank&0x7)*0x100000)/4) + offset;
+	uint32_t fulloffset = (((cram_bank&0x7)*0x100000)/4) + offset;
 
 	return LITTLE_ENDIANIZE_INT32(cps3_char_ram[fulloffset]);
 }
 
 static WRITE32_HANDLER( cram_data_w )
 {
-	UINT32 fulloffset = (((cram_bank&0x7)*0x100000)/4) + offset;
+	uint32_t fulloffset = (((cram_bank&0x7)*0x100000)/4) + offset;
 	mem_mask = LITTLE_ENDIANIZE_INT32(mem_mask);
 	data = LITTLE_ENDIANIZE_INT32(data);
 	COMBINE_DATA(&cps3_char_ram[fulloffset]);
@@ -1349,7 +2392,7 @@ static WRITE32_HANDLER( cram_data_w )
 
 static READ32_HANDLER( cps3_gfxflash_r )
 {
-	UINT32 result = 0;
+	uint32_t result = 0;
 	int flash1 = 8;
 	int flash2 = 9;
 	if (cram_gfxflash_bank&1) offset += 0x200000/4;
@@ -1357,30 +2400,14 @@ static READ32_HANDLER( cps3_gfxflash_r )
 	flash1 += cram_gfxflash_bank&0x3e;
 	flash2 += cram_gfxflash_bank&0x3e;
 
-	if(DEBUG_PRINTF) printf("gfxflash_r\n");
-
 	if (ACCESSING_BITS_24_31)	// GFX Flash 1
-	{
-		logerror("read GFX flash chip %d addr %02x\n", flash1-8, (offset<<1));
 		result |= intelflash_read(flash1, (offset<<1) ) << 24;
-	}
 	if (ACCESSING_BITS_16_23)	// GFX Flash 2
-	{
-		logerror("read GFX flash chip %d addr %02x\n", flash2-8, (offset<<1));
 		result |= intelflash_read(flash2, (offset<<1) ) << 16;
-	}
 	if (ACCESSING_BITS_8_15)	// GFX Flash 1
-	{
-		logerror("read GFX flash chip %d addr %02x\n", flash1-8, (offset<<1)+1);
 		result |= intelflash_read(flash1, (offset<<1)+0x1 ) << 8;
-	}
 	if (ACCESSING_BITS_0_7)	// GFX Flash 2
-	{
-		logerror("read GFX flash chip %d addr %02x\n", flash2-8, (offset<<1)+1);
 		result |= intelflash_read(flash2, (offset<<1)+0x1 ) << 0;
-	}
-
-	//printf("read GFX flash chips addr %02x returning %08x mem_mask %08x crambank %08x gfxbank %08x\n", offset*2, result,mem_mask,  cram_bank, cram_gfxflash_bank  );
 
 	return result;
 }
@@ -1395,42 +2422,34 @@ static WRITE32_HANDLER( cps3_gfxflash_w )
 	flash1 += cram_gfxflash_bank&0x3e;
 	flash2 += cram_gfxflash_bank&0x3e;
 
-
-//  if(DEBUG_PRINTF) printf("cps3_gfxflash_w %08x %08x %08x\n", offset *2, data, mem_mask);
-
-
 	if (ACCESSING_BITS_24_31)	// GFX Flash 1
 	{
 		command = (data >> 24) & 0xff;
-		logerror("write to GFX flash chip %d addr %02x cmd %02x\n", flash1-8, (offset<<1), command);
 		intelflash_write(flash1, (offset<<1), command);
 	}
 	if (ACCESSING_BITS_16_23)	// GFX Flash 2
 	{
 		command = (data >> 16) & 0xff;
-		logerror("write to GFX flash chip %d addr %02x cmd %02x\n", flash2-8, (offset<<1), command);
 		intelflash_write(flash2, (offset<<1), command);
 	}
 	if (ACCESSING_BITS_8_15)	// GFX Flash 1
 	{
 		command = (data >> 8) & 0xff;
-		logerror("write to GFX flash chip %d addr %02x cmd %02x\n", flash1-8, (offset<<1)+1, command);
 		intelflash_write(flash1, (offset<<1)+0x1, command);
 	}
 	if (ACCESSING_BITS_0_7)	// GFX Flash 2
 	{
 		command = (data >> 0) & 0xff;
-		//if ( ((offset<<1)+1) != 0x555) printf("write to GFX flash chip %d addr %02x cmd %02x\n", flash1-8, (offset<<1)+1, command);
 		intelflash_write(flash2, (offset<<1)+0x1, command);
 	}
 
 	/* make a copy in the linear memory region we actually use for drawing etc.  having it stored in interleaved flash roms isnt' very useful */
 	{
-		UINT32* romdata = (UINT32*)cps3_user5region;
+		uint32_t* romdata = (uint32_t*)cps3_user5region;
 		int real_offset = 0;
-		UINT32 newdata;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(flash1);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(flash2);
+		uint32_t newdata;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(flash1);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(flash2);
 
 		real_offset = ((cram_gfxflash_bank&0x3e) * 0x200000) + offset*4;
 
@@ -1439,39 +2458,24 @@ static WRITE32_HANDLER( cps3_gfxflash_w )
                   (ptr2[((offset*2)&0xfffffffe)+0]<<0)  |
                   (ptr2[((offset*2)&0xfffffffe)+1]<<16));
 
-//      printf("flashcrap %08x %08x %08x\n", offset *2, romdata[real_offset/4], newdata);
 		romdata[real_offset/4] = newdata;
 	}
 }
 
 
 
-static UINT32 cps3_flashmain_r(int base, UINT32 offset, UINT32 mem_mask)
+static uint32_t cps3_flashmain_r(int base, uint32_t offset, uint32_t mem_mask)
 {
-	UINT32 result = 0;
+	uint32_t result = 0;
 
 	if (ACCESSING_BITS_24_31)	// Flash 1
-	{
-//      logerror("read flash chip %d addr %02x\n", base+0, offset*4 );
 		result |= (intelflash_read(base+0, offset)<<24);
-	}
 	if (ACCESSING_BITS_16_23)	// Flash 1
-	{
-//      logerror("read flash chip %d addr %02x\n", base+1, offset*4 );
 		result |= (intelflash_read(base+1, offset)<<16);
-	}
 	if (ACCESSING_BITS_8_15)	// Flash 1
-	{
-//      logerror("read flash chip %d addr %02x\n", base+2, offset*4 );
 		result |= (intelflash_read(base+2, offset)<<8);
-	}
 	if (ACCESSING_BITS_0_7)	// Flash 1
-	{
-//      logerror("read flash chip %d addr %02x\n", base+3, offset*4 );
 		result |= (intelflash_read(base+3, offset)<<0);
-	}
-
-//  if (base==4) logerror("read flash chips addr %02x returning %08x\n", offset*4, result );
 
 	return result;
 }
@@ -1480,7 +2484,7 @@ static UINT32 cps3_flashmain_r(int base, UINT32 offset, UINT32 mem_mask)
 
 static READ32_HANDLER( cps3_flash1_r )
 {
-	UINT32 retvalue = cps3_flashmain_r(0, offset,mem_mask);
+	uint32_t retvalue = cps3_flashmain_r(0, offset,mem_mask);
 
 	if (cps3_altEncryption) return retvalue;
 
@@ -1490,7 +2494,7 @@ static READ32_HANDLER( cps3_flash1_r )
 
 static READ32_HANDLER( cps3_flash2_r )
 {
-	UINT32 retvalue = cps3_flashmain_r(4, offset,mem_mask);
+	uint32_t retvalue = cps3_flashmain_r(4, offset,mem_mask);
 
 	if (cps3_altEncryption) return retvalue;
 
@@ -1498,44 +2502,40 @@ static READ32_HANDLER( cps3_flash2_r )
 	return retvalue;
 }
 
-static void cps3_flashmain_w(running_machine *machine, int base, UINT32 offset, UINT32 data, UINT32 mem_mask)
+static void cps3_flashmain_w(running_machine *machine, int base, uint32_t offset, uint32_t data, uint32_t mem_mask)
 {
 	int command;
 	if (ACCESSING_BITS_24_31)	// Flash 1
 	{
 		command = (data >> 24) & 0xff;
-		logerror("write to flash chip %d addr %02x cmd %02x\n", base+0, offset, command);
 		intelflash_write(base+0, offset, command);
 	}
 	if (ACCESSING_BITS_16_23)	// Flash 2
 	{
 		command = (data >> 16) & 0xff;
-		logerror("write to flash chip %d addr %02x cmd %02x\n", base+1, offset, command);
 		intelflash_write(base+1, offset, command);
 	}
 	if (ACCESSING_BITS_8_15)	// Flash 2
 	{
 		command = (data >> 8) & 0xff;
-		logerror("write to flash chip %d addr %02x cmd %02x\n", base+2, offset, command);
 		intelflash_write(base+2, offset, command);
 	}
 	if (ACCESSING_BITS_0_7)	// Flash 2
 	{
 		command = (data >> 0) & 0xff;
-		logerror("write to flash chip %d addr %02x cmd %02x\n", base+3, offset, command);
 		intelflash_write(base+3, offset, command);
 	}
 
 	/* copy data into regions to execute from */
 	{
-		UINT32* romdata =  (UINT32*)cps3_user4region;
-		UINT32* romdata2 = (UINT32*)decrypted_gamerom;
+		uint32_t* romdata =  (uint32_t*)cps3_user4region;
+		uint32_t* romdata2 = (uint32_t*)decrypted_gamerom;
 		int real_offset = 0;
-		UINT32 newdata;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(base+0);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(base+1);
-		UINT8* ptr3 = (UINT8*)intelflash_getmemptr(base+2);
-		UINT8* ptr4 = (UINT8*)intelflash_getmemptr(base+3);
+		uint32_t newdata;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(base+0);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(base+1);
+		uint8_t* ptr3 = (uint8_t*)intelflash_getmemptr(base+2);
+		uint8_t* ptr4 = (uint8_t*)intelflash_getmemptr(base+3);
 
 		real_offset = offset * 4;
 
@@ -1550,8 +2550,6 @@ static void cps3_flashmain_w(running_machine *machine, int base, UINT32 offset, 
 			      (ptr2[offset]<<16) |
                   (ptr3[offset]<<8) |
                   (ptr4[offset]<<0);
-
-		//printf("%08x %08x %08x %08x %08x\n",offset, romdata2[offset], romdata[offset], newdata,  newdata^cps3_mask(0x6000000+real_offset, cps3_key1, cps3_key2)  );
 
 		romdata[offset] = newdata;
 		romdata2[offset] = newdata^cps3_mask(0x6000000+real_offset, cps3_key1, cps3_key2);
@@ -1572,54 +2570,48 @@ static WRITE32_HANDLER( cram_gfxflash_bank_w )
 {
 	if (ACCESSING_BITS_24_31)
 	{
-		//printf("cram_gfxflash_bank_w MSB32 %08x\n",data);
-/*
-    SIMM 3 (Rom 30/31)
-    cram_gfxflash_bank_w MSB32 00020000  // first half of gfx 0 + 1
-    cram_gfxflash_bank_w MSB32 00030000  // 2nd half of gfx 0 + 1
-    cram_gfxflash_bank_w MSB32 00040000  // first half of gfx 2 + 3
-    cram_gfxflash_bank_w MSB32 00050000
-    cram_gfxflash_bank_w MSB32 00060000  // first half of gfx 4 + 5
-    cram_gfxflash_bank_w MSB32 00070000
-    cram_gfxflash_bank_w MSB32 00080000  // first half of gfx 6 + 7
-    cram_gfxflash_bank_w MSB32 00090000
-    SIMM 4 (Rom 40/41)
-    cram_gfxflash_bank_w MSB32 000a0000  // first half of gfx 8 + 9
-    cram_gfxflash_bank_w MSB32 000b0000
-    cram_gfxflash_bank_w MSB32 000c0000  // first half of gfx 10 + 11
-    cram_gfxflash_bank_w MSB32 000d0000
-    cram_gfxflash_bank_w MSB32 000e0000  // first half of gfx 12 + 13
-    cram_gfxflash_bank_w MSB32 000f0000
-    cram_gfxflash_bank_w MSB32 00100000  // first half of gfx 14 + 15
-    cram_gfxflash_bank_w MSB32 00110000
-    SIMM 5 (Rom 50/51)
-    cram_gfxflash_bank_w MSB32 00120000  // first half of gfx 16 + 17
-    cram_gfxflash_bank_w MSB32 00130000
-    cram_gfxflash_bank_w MSB32 00140000  // first half of gfx 18 + 19
-    cram_gfxflash_bank_w MSB32 00150000
-    cram_gfxflash_bank_w MSB32 00160000  // first half of gfx 20 + 21
-    cram_gfxflash_bank_w MSB32 00170000
-    cram_gfxflash_bank_w MSB32 00180000  // first half of gfx 22 + 23
-    cram_gfxflash_bank_w MSB32 00190000
-    SIMM 6 (Rom 60/61)
-    cram_gfxflash_bank_w MSB32 001a0000  // first half of gfx 24 + 25
-    cram_gfxflash_bank_w MSB32 001b0000
-    cram_gfxflash_bank_w MSB32 001c0000  // first half of gfx 26 + 27
-    cram_gfxflash_bank_w MSB32 001d0000
-    cram_gfxflash_bank_w MSB32 001e0000  // first half of gfx 28 + 29
-    cram_gfxflash_bank_w MSB32 001f0000
-    cram_gfxflash_bank_w MSB32 00200000  // first half of gfx 30 + 31
-    cram_gfxflash_bank_w MSB32 00210000
-    SIMM 7 (Rom 70/71) ** NOT USED (would follow on in sequence tho)
+		/*
+		   SIMM 3 (Rom 30/31)
+		   cram_gfxflash_bank_w MSB32 00020000  // first half of gfx 0 + 1
+		   cram_gfxflash_bank_w MSB32 00030000  // 2nd half of gfx 0 + 1
+		   cram_gfxflash_bank_w MSB32 00040000  // first half of gfx 2 + 3
+		   cram_gfxflash_bank_w MSB32 00050000
+		   cram_gfxflash_bank_w MSB32 00060000  // first half of gfx 4 + 5
+		   cram_gfxflash_bank_w MSB32 00070000
+		   cram_gfxflash_bank_w MSB32 00080000  // first half of gfx 6 + 7
+		   cram_gfxflash_bank_w MSB32 00090000
+		   SIMM 4 (Rom 40/41)
+		   cram_gfxflash_bank_w MSB32 000a0000  // first half of gfx 8 + 9
+		   cram_gfxflash_bank_w MSB32 000b0000
+		   cram_gfxflash_bank_w MSB32 000c0000  // first half of gfx 10 + 11
+		   cram_gfxflash_bank_w MSB32 000d0000
+		   cram_gfxflash_bank_w MSB32 000e0000  // first half of gfx 12 + 13
+		   cram_gfxflash_bank_w MSB32 000f0000
+		   cram_gfxflash_bank_w MSB32 00100000  // first half of gfx 14 + 15
+		   cram_gfxflash_bank_w MSB32 00110000
+		   SIMM 5 (Rom 50/51)
+		   cram_gfxflash_bank_w MSB32 00120000  // first half of gfx 16 + 17
+		   cram_gfxflash_bank_w MSB32 00130000
+		   cram_gfxflash_bank_w MSB32 00140000  // first half of gfx 18 + 19
+		   cram_gfxflash_bank_w MSB32 00150000
+		   cram_gfxflash_bank_w MSB32 00160000  // first half of gfx 20 + 21
+		   cram_gfxflash_bank_w MSB32 00170000
+		   cram_gfxflash_bank_w MSB32 00180000  // first half of gfx 22 + 23
+		   cram_gfxflash_bank_w MSB32 00190000
+		   SIMM 6 (Rom 60/61)
+		   cram_gfxflash_bank_w MSB32 001a0000  // first half of gfx 24 + 25
+		   cram_gfxflash_bank_w MSB32 001b0000
+		   cram_gfxflash_bank_w MSB32 001c0000  // first half of gfx 26 + 27
+		   cram_gfxflash_bank_w MSB32 001d0000
+		   cram_gfxflash_bank_w MSB32 001e0000  // first half of gfx 28 + 29
+		   cram_gfxflash_bank_w MSB32 001f0000
+		   cram_gfxflash_bank_w MSB32 00200000  // first half of gfx 30 + 31
+		   cram_gfxflash_bank_w MSB32 00210000
+		   SIMM 7 (Rom 70/71) ** NOT USED (would follow on in sequence tho)
 
-    */
+		 */
 		cram_gfxflash_bank = (data & 0xffff0000) >> 16;
 		cram_gfxflash_bank-= 0x0002;// as with sound access etc. first 4 meg is 'special' and skipped
-	}
-
-	if (ACCESSING_BITS_0_7)
-	{
-	/*  if(DEBUG_PRINTF)*/ printf("cram_gfxflash_bank_LSB_w LSB32 %08x\n",data);
 	}
 }
 
@@ -1627,6 +2619,45 @@ static WRITE32_HANDLER( cram_gfxflash_bank_w )
 static READ32_HANDLER( cps3_vbl_r )
 {
 	return 0x00000000;
+}
+
+/* PPU register 0x82 (32-bit slot at 0x040C0080, accessed with mask 0x0000ffff).
+ * "Sprite list DMA / copy to PPU on-chip RAM." After uploading a new sprite
+ * list to sprite RAM, the game writes the 8/9/8/9... pattern (clocking the DMA
+ * engine) and then a final 0 to release. Real hardware uses this to copy the
+ * list from main sprite RAM into a small on-chip RAM that the rasterizer reads
+ * from. mame2010 renders straight out of sprite RAM with no DMA step, so the
+ * trigger is a no-op for us; we accept the writes silently to keep the log
+ * clean. cps3_vbl_r at 0x040C000C already returns 0 for bit 0 ("sprite list
+ * DMA active"), so the game's polling loop after the 8/9 pattern exits on the
+ * first read and proceeds to the final 0-write naturally. */
+static WRITE32_HANDLER( cps3_spritedma_w )
+{
+}
+
+/* SS layer ("Score Screen" text tilemap) CRT timing and scroll registers
+ * at 0x05050000-0x0505001F. Even bytes carry the data (upstream uses
+ * .umask32(0x00ff00ff)). Layout per documentation:
+ *
+ *   00 H Sync       0a V Start L
+ *   01 H Start L    0b V Start H
+ *   02 H Start H    0c V Blank L
+ *   03 H Blank L    0d V Blank H
+ *   04 H Blank H    0e V Total L
+ *   05 H Total L    0f V Total H
+ *   06 H Total H    10 V Scroll L
+ *   07 H Scroll L   11 V Scroll H
+ *   08 H Scroll H
+ *   09 V Sync
+ *
+ * These are programmed once at boot for the active video mode and never read
+ * back. mame2010 uses fixed SS-layer rendering timing, so the per-game tweaks
+ * have no effect; we accept the writes silently to suppress log spam. The
+ * existing ss_bank_base_w (offset 0x10 / dword 0x05050020) and ss_pal_base_w
+ * (offset 0x12 / dword 0x05050024) continue to handle the registers they
+ * already covered. */
+static WRITE32_HANDLER( cps3_ss_regs_w )
+{
 }
 
 static READ32_HANDLER( cps3_unk_io_r )
@@ -1647,7 +2678,7 @@ static READ32_HANDLER( cps3_40C0004_r )
 
 /* EEPROM access is a little odd, I think it accesses eeprom through some kind of
    additional interface, as these writes aren't normal for the type of eeprom we have */
-static UINT16 cps3_current_eeprom_read;
+static uint16_t cps3_current_eeprom_read;
 
 static READ32_HANDLER( cps3_eeprom_r )
 {
@@ -1655,27 +2686,20 @@ static READ32_HANDLER( cps3_eeprom_r )
 
 	if (addr>=0x100 && addr<=0x17f)
 	{
-		if (ACCESSING_BITS_24_31) cps3_current_eeprom_read = (cps3_eeprom[offset-0x100/4] & 0xffff0000)>>16;
-		else cps3_current_eeprom_read = (cps3_eeprom[offset-0x100/4] & 0x0000ffff)>>0;
+		if (ACCESSING_BITS_24_31)
+			cps3_current_eeprom_read = (cps3_eeprom[offset-0x100/4] & 0xffff0000)>>16;
+		else
+			cps3_current_eeprom_read = (cps3_eeprom[offset-0x100/4] & 0x0000ffff)>>0;
 		// read word to latch...
-		return 0x00000000;
 	}
 	else if (addr == 0x200)
 	{
 		// busy flag / read data..
-		if (ACCESSING_BITS_24_31) return 0;
-		else
-		{
-			//if(DEBUG_PRINTF) printf("reading %04x from eeprom\n", cps3_current_eeprom_read);
-			return cps3_current_eeprom_read;
-		}
+		if (ACCESSING_BITS_24_31)
+			return 0;
+		return cps3_current_eeprom_read;
 	}
-	else
-	{
-	//  if(DEBUG_PRINTF) printf("unk read eeprom addr %04x, mask %08x\n", addr, mem_mask);
-		return 0x00000000;
-	}
-	return 0x00000000;
+	return 0;
 }
 
 static WRITE32_HANDLER( cps3_eeprom_w )
@@ -1689,30 +2713,17 @@ static WRITE32_HANDLER( cps3_eeprom_w )
 		// write word to storage
 
 	}
-	else if (addr>=0x180 && addr<=0x1ff)
-	{
-		// always 00000000 ? incrememnt access?
-	}
-	else
-	{
-	//  if(DEBUG_PRINTF) printf("unk write eeprom addr %04x, data %08x, mask %08x\n", addr, data, mem_mask);
-	}
-
 }
 
 static READ32_HANDLER( cps3_cdrom_r )
 {
-	UINT32 retval = 0;
+	uint32_t retval = 0;
 
 	if (ACCESSING_BITS_24_31)
-	{
-		retval |= ((UINT16)wd33c93_r(space,0))<<16;
-	}
+		retval |= ((uint16_t)wd33c93_r(space,0))<<16;
 
 	if (ACCESSING_BITS_0_7)
-	{
-		retval |= (UINT16)wd33c93_r(space,1);
-	}
+		retval |= (uint16_t)wd33c93_r(space,1);
 
 	return retval;
 }
@@ -1735,35 +2746,23 @@ static WRITE32_HANDLER( cps3_ss_bank_base_w )
 	// might be scroll registers or something else..
 	// used to display bank with 'insert coin' on during sfiii2 attract intro
 	COMBINE_DATA(&cps3_ss_bank_base);
-
-//  printf("cps3_ss_bank_base_w %08x %08x\n", data, mem_mask);
 }
 
 static WRITE32_HANDLER( cps3_ss_pal_base_w )
 {
-	 if(DEBUG_PRINTF) printf ("cps3_ss_pal_base_w %08x %08x\n", data, mem_mask);
-
 	if(ACCESSING_BITS_24_31)
-	{
 		cps3_ss_pal_base = (data & 0x00ff0000)>>16;
-
-		if (data & 0xff000000) printf("cps3_ss_pal_base MSB32 upper bits used %04x \n", data);
-	}
-	else
-	{
-	//  printf("cps3_ss_pal_base LSB32 used %04x \n", data);
-	}
 }
 
 //<ElSemi> +0 X  +2 Y +4 unknown +6 enable (&0x8000) +8 low part tilemap base, high part linescroll base
 //<ElSemi> (a word each)
 
-static UINT32 paldma_source;
-static UINT32 paldma_realsource;
-static UINT32 paldma_dest;
-static UINT32 paldma_fade;
-static UINT32 paldma_other2;
-static UINT32 paldma_length;
+static uint32_t paldma_source;
+static uint32_t paldma_realsource;
+static uint32_t paldma_dest;
+static uint32_t paldma_fade;
+static uint32_t paldma_other2;
+static uint32_t paldma_length;
 
 static WRITE32_HANDLER( cps3_palettedma_w )
 {
@@ -1793,14 +2792,11 @@ static WRITE32_HANDLER( cps3_palettedma_w )
 			if (data & 0x0002)
 			{
 				int i;
-				UINT16* src = (UINT16*)cps3_user5region;
-			//  if(DEBUG_PRINTF) printf("CPS3 pal dma start %08x (real: %08x) dest %08x fade %08x other2 %08x (length %04x)\n", paldma_source, paldma_realsource, paldma_dest, paldma_fade, paldma_other2, paldma_length);
+				uint16_t* src = (uint16_t*)cps3_user5region;
 
 				for (i=0;i<paldma_length;i++)
 				{
-					UINT16 coldata = src[BYTE_XOR_BE(((paldma_realsource>>1)+i))];
-
-					//if (paldma_fade!=0) printf("%08x\n",paldma_fade);
+					uint16_t coldata = src[BYTE_XOR_BE(((paldma_realsource>>1)+i))];
 
 					cps3_set_mame_colours(space->machine, (paldma_dest+i)^1, coldata, paldma_fade);
 				}
@@ -1815,39 +2811,45 @@ static WRITE32_HANDLER( cps3_palettedma_w )
 
 }
 
-static UINT32 chardma_source;
-static UINT32 chardma_other;
+static uint32_t chardma_source;
+static uint32_t chardma_other;
 
-//static UINT8* current_table;
-static UINT32 current_table_address;
+//static uint8_t* current_table;
+static uint32_t current_table_address;
 
 static int cps3_rle_length = 0;
 
 static int last_normal_byte = 0;
 
 
-static UINT32 process_byte( running_machine *machine, UINT8 real_byte, UINT32 destination, int max_length )
+static uint32_t process_byte( running_machine *machine, uint8_t real_byte, uint32_t destination, int max_length )
 {
-	UINT8* dest       = (UINT8*)cps3_char_ram;
-
-	//printf("process byte for destination %08x\n", destination);
+	uint8_t* dest       = (uint8_t*)cps3_char_ram;
 
 	destination&=0x7fffff;
 
 	if (real_byte&0x40)
 	{
 		int tranfercount = 0;
+		uint32_t last_code = 0xffffffff;
 
-		//printf("Set RLE Mode\n");
 		cps3_rle_length = (real_byte&0x3f)+1;
-
-		//printf("RLE Operation (length %08x\n", cps3_rle_length );
 
 		while (cps3_rle_length)
 		{
-			dest[((destination+tranfercount)&0x7fffff)^3] = (last_normal_byte&0x3f);
-			gfx_element_mark_dirty(machine->gfx[1], ((destination+tranfercount)&0x7fffff)/0x100);
-			//printf("RLE WRite Byte %08x, %02x\n", destination+tranfercount, real_byte);
+			uint32_t addr = (destination+tranfercount)&0x7fffff;
+			uint32_t code = addr/0x100;
+
+			dest[addr^3] = (last_normal_byte&0x3f);
+
+			/* a single mark covers a whole 0x100-byte tile, so within an RLE
+			   run only mark when we cross into a new tile rather than once
+			   per byte */
+			if (code != last_code)
+			{
+				gfx_element_mark_dirty(machine->gfx[1], code);
+				last_code = code;
+			}
 
 			tranfercount++;
 			cps3_rle_length--;
@@ -1862,7 +2864,6 @@ static UINT32 process_byte( running_machine *machine, UINT8 real_byte, UINT32 de
 	}
 	else
 	{
-		//printf("Write Normal Data\n");
 		dest[(destination&0x7fffff)^3] = real_byte;
 		last_normal_byte = real_byte;
 		gfx_element_mark_dirty(machine->gfx[1], (destination&0x7fffff)/0x100);
@@ -1870,9 +2871,9 @@ static UINT32 process_byte( running_machine *machine, UINT8 real_byte, UINT32 de
 	}
 }
 
-static void cps3_do_char_dma( running_machine *machine, UINT32 real_source, UINT32 real_destination, UINT32 real_length )
+static void cps3_do_char_dma( running_machine *machine, uint32_t real_source, uint32_t real_destination, uint32_t real_length )
 {
-	UINT8* sourcedata = (UINT8*)cps3_user5region;
+	uint8_t* sourcedata = (uint8_t*)cps3_user5region;
 	int length_remaining;
 
 	last_normal_byte = 0;
@@ -1880,15 +2881,15 @@ static void cps3_do_char_dma( running_machine *machine, UINT32 real_source, UINT
 	length_remaining = real_length;
 	while (length_remaining)
 	{
-		UINT8 current_byte;
+		uint8_t current_byte;
 
 		current_byte = sourcedata[DMA_XOR(real_source)];
 		real_source++;
 
 		if (current_byte & 0x80)
 		{
-			UINT8 real_byte;
-			UINT32 length_processed;
+			uint8_t real_byte;
+			uint32_t length_processed;
 			current_byte &= 0x7f;
 
 			real_byte = sourcedata[DMA_XOR((current_table_address+current_byte*2+0))];
@@ -1909,7 +2910,7 @@ static void cps3_do_char_dma( running_machine *machine, UINT32 real_source, UINT
 		}
 		else
 		{
-			UINT32 length_processed;
+			uint32_t length_processed;
 			length_processed = process_byte( machine, current_byte, real_destination, length_remaining );
 			length_remaining-=length_processed; // subtract the number of bytes the operation has taken
 			real_destination+=length_processed; // add it onto the destination
@@ -1923,20 +2924,30 @@ static void cps3_do_char_dma( running_machine *machine, UINT32 real_source, UINT
 
 static unsigned short lastb;
 static unsigned short lastb2;
-static UINT32 ProcessByte8(running_machine *machine,UINT8 b,UINT32 dst_offset)
+static uint32_t ProcessByte8(running_machine *machine,uint8_t b,uint32_t dst_offset)
 {
-	UINT8* destRAM = (UINT8*)cps3_char_ram;
+	uint8_t* destRAM = (uint8_t*)cps3_char_ram;
 	int l=0;
 
 	if(lastb==lastb2)	//rle
 	{
 		int i;
 		int rle=(b+1)&0xff;
+		uint32_t last_code = 0xffffffff;
 
 		for(i=0;i<rle;++i)
 		{
+			uint32_t code = (dst_offset&0x7fffff)/0x100;
+
 			destRAM[(dst_offset&0x7fffff)^3] = lastb;
-			gfx_element_mark_dirty(machine->gfx[1], (dst_offset&0x7fffff)/0x100);
+
+			/* one mark covers a whole 0x100-byte tile, so only mark when the
+			   run crosses into a new tile rather than once per byte */
+			if (code != last_code)
+			{
+				gfx_element_mark_dirty(machine->gfx[1], code);
+				last_code = code;
+			}
 
 			dst_offset++;
 			++l;
@@ -1955,11 +2966,11 @@ static UINT32 ProcessByte8(running_machine *machine,UINT8 b,UINT32 dst_offset)
 	}
 }
 
-static void cps3_do_alt_char_dma( running_machine *machine, UINT32 src, UINT32 real_dest, UINT32 real_length )
+static void cps3_do_alt_char_dma( running_machine *machine, uint32_t src, uint32_t real_dest, uint32_t real_length )
 {
-	UINT8* px = (UINT8*)cps3_user5region;
-	UINT32 start = real_dest;
-	UINT32 ds = real_dest;
+	uint8_t* px = (uint8_t*)cps3_user5region;
+	uint32_t start = real_dest;
+	uint32_t ds = real_dest;
 
 	lastb=0xfffe;
 	lastb2=0xffff;
@@ -1967,16 +2978,16 @@ static void cps3_do_alt_char_dma( running_machine *machine, UINT32 src, UINT32 r
 	while(1)
 	{
 		int i;
-		UINT8 ctrl=px[DMA_XOR(src)];
+		uint8_t ctrl=px[DMA_XOR(src)];
 		++src;
 
 		for(i=0;i<8;++i)
 		{
-			UINT8 p=px[DMA_XOR(src)];
+			uint8_t p=px[DMA_XOR(src)];
 
 			if(ctrl&0x80)
 			{
-				UINT8 real_byte;
+				uint8_t real_byte;
 				p&=0x7f;
 				real_byte = px[DMA_XOR((current_table_address+p*2+0))];
 				ds+=ProcessByte8(machine,real_byte,ds);
@@ -1996,25 +3007,21 @@ static void cps3_do_alt_char_dma( running_machine *machine, UINT32 src, UINT32 r
 	}
 }
 
-static void cps3_process_character_dma(running_machine *machine, UINT32 address)
+static void cps3_process_character_dma(running_machine *machine, uint32_t address)
 {
 	int i;
 
-	//printf("charDMA start:\n");
-
 	for (i = 0; i < 0x1000; i += 3)
 	{
-		UINT32 dat1 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 0 + (address)]);
-		UINT32 dat2 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 1 + (address)]);
-		UINT32 dat3 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 2 + (address)]);
-		UINT32 real_source      = (dat3 << 1) - 0x400000;
-		UINT32 real_destination =  dat2 << 3;
-		UINT32 real_length      = (((dat1 & 0x001fffff) + 1) << 3);
+		uint32_t dat1 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 0 + (address)]);
+		uint32_t dat2 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 1 + (address)]);
+		uint32_t dat3 = LITTLE_ENDIANIZE_INT32(cps3_char_ram[i + 2 + (address)]);
+		uint32_t real_source      = (dat3 << 1) - 0x400000;
+		uint32_t real_destination =  dat2 << 3;
+		uint32_t real_length      = (((dat1 & 0x001fffff) + 1) << 3);
 
 		/* 0x01000000 is the end of list marker, 0x13131313 is our default fill */
 		if ((dat1 == 0x01000000) || (dat1 == 0x13131313)) break;
-
-        //printf("%08x %08x %08x real_source %08x (rom %d offset %08x) real_destination %08x, real_length %08x\n", dat1, dat2, dat3, real_source, real_source/0x800000, real_source%0x800000, real_destination, real_length);
 
 		if  ((dat1 & 0x00e00000) == 0x00800000)
 		{
@@ -2040,29 +3047,16 @@ static void cps3_process_character_dma(running_machine *machine, UINT32 address)
 			cps3_do_alt_char_dma( machine, real_source, real_destination, real_length);
 			cputag_set_input_line(machine, "maincpu", 10, ASSERT_LINE);
 		}
-		else
-		{
-			printf("Unknown DMA List Command Type\n"); // warzard uses command 0, uncompressed? but for what?
-		}
-
 	}
 }
 
 static WRITE32_HANDLER( cps3_characterdma_w )
 {
-	if(DEBUG_PRINTF) printf("chardma_w %08x %08x %08x\n", offset, data, mem_mask);
-
 	if (offset==0)
 	{
 		//COMBINE_DATA(&chardma_source);
 		if (ACCESSING_BITS_0_7)
-		{
 			chardma_source = data & 0x0000ffff;
-		}
-		if (ACCESSING_BITS_24_31)
-		{
-			if(DEBUG_PRINTF) printf("chardma_w accessing MSB32 of offset 0");
-		}
 	}
 	else if (offset==1)
 	{
@@ -2072,23 +3066,10 @@ static WRITE32_HANDLER( cps3_characterdma_w )
 		{
 			if ((data>>16) & 0x0040)
 			{
-				UINT32 list_address;
+				uint32_t list_address;
 				list_address = (chardma_source | ((chardma_other&0x003f0000)));
-
-				//printf("chardma_w activated %08x %08x (address = cram %08x)\n", chardma_source, chardma_other, list_address*4 );
 				cps3_process_character_dma(space->machine, list_address);
 			}
-			else
-			{
-				if(DEBUG_PRINTF) printf("chardma_w NOT activated %08x %08x\n", chardma_source, chardma_other );
-			}
-
-			if ((data>>16) & 0xff80)
-				if(DEBUG_PRINTF) printf("chardma_w unknown bits in activate command %08x %08x\n", chardma_source, chardma_other );
-		}
-		else
-		{
-			if(DEBUG_PRINTF) printf("chardma_w LSB32 write to activate command %08x %08x\n", chardma_source, chardma_other );
 		}
 	}
 }
@@ -2103,6 +3084,74 @@ static WRITE32_HANDLER( cps3_irq12_ack_w )
 	cputag_set_input_line(space->machine, "maincpu", 12, CLEAR_LINE); return;
 }
 
+/* IRQ 14 and 6 are documented as "unused" -- no driver code asserts them, so
+ * a write here only needs to clear the line in case some boot-time IRQ-vector
+ * sanity check is in play. The game writes to these once on init. */
+static WRITE32_HANDLER( cps3_irq14_ack_w )
+{
+	cputag_set_input_line(space->machine, "maincpu", 14, CLEAR_LINE); return;
+}
+
+static WRITE32_HANDLER( cps3_irq6_ack_w )
+{
+	cputag_set_input_line(space->machine, "maincpu", 6, CLEAR_LINE); return;
+}
+
+/* PPU register 0x8E (32-bit slot at 0x040C008C, accessed with mask 0x0000ffff).
+ * Per documented register layout: "set to 0x00A0 by BIOS init after Pal/Char
+ * DMA registers, never written later (Char/Pal DMA IRQ enable?)". One-shot
+ * BIOS init; mame2010 generates Pal/Char DMA completion IRQs directly without
+ * a separate enable gate, so we accept the write silently. */
+static WRITE32_HANDLER( cps3_dma_irq_enable_w )
+{
+}
+
+/* IOU (DL-2929) output port at 0x05000C00 -- coin counters, coin lockout,
+ * start-button LEDs, and similar JAMMA-edge outputs. Lower 16 bits carry the
+ * bit-mask of outputs. Driven continuously during gameplay as inputs are
+ * pressed and credits change. mame2010 doesn't drive physical JAMMA outputs,
+ * so we accept the writes silently. The companion writes at +0x10/+0x14/+0x18
+ * are one-shot BIOS clears of further IOU output registers. */
+static WRITE32_HANDLER( cps3_outputs_w )
+{
+}
+
+/* GLL1 (DL-3429) DMA/bus-controller register area at 0x07FF0000-0x07FF00FF.
+ * Used by the BIOS to set up bus timing (one-shot writes to +0x00/+0x04/+0x08
+ * at boot) and by the flash-identify routine to gate per-SIMM access via
+ * +0x0C and +0x48 (toggled 1/0 around each chip read). mame2010 services
+ * SIMM/flash reads directly through the flash_r/flash_w and gfxflash_r/w
+ * handlers (with bank selection via cram_gfxflash_bank_w), so the
+ * higher-level GLL1 gating is functionally a no-op for us. */
+static WRITE32_HANDLER( cps3_gll1_w )
+{
+}
+
+/* Region 0x40000000-0x4000003F -- early BIOS writes (PC ~0x4CC, before the
+ * encrypted code path) of the constant 0x00000410 at stride 0x10. This is
+ * CPS-3 board-specific hardware initialization, likely cache/bus-timing
+ * configuration on the secondary memory bus shadow. One-shot, no in-game
+ * reads, no observable effect. */
+static WRITE32_HANDLER( cps3_unk_40000000_w )
+{
+}
+
+/* I/O register area continuation at 0x05000A20-0x05000A2F. The reads in the
+ * adjacent 0x05000A00-0x05000A1F window are already handled by cps3_unk_io_r;
+ * these writes are one-shot BIOS init in the same I/O block. */
+static WRITE32_HANDLER( cps3_unk_5000a_w )
+{
+}
+
+/* Single-register slot at 0x05150000 -- one-shot BIOS writes with values like
+ * 0x640F and 0x4642 (low 16 bits). Adjacent to the IRQ-ack series at
+ * 0x05100000-0x05130000 and the SCSI window at 0x05140000, but the values are
+ * data-shaped rather than ack-shaped. Function not yet documented; no
+ * observable game effect when discarded. */
+static WRITE32_HANDLER( cps3_unk_5150000_w )
+{
+}
+
 static WRITE32_HANDLER( cps3_unk_vidregs_w )
 {
 	COMBINE_DATA(&cps3_unk_vidregs[offset]);
@@ -2110,7 +3159,7 @@ static WRITE32_HANDLER( cps3_unk_vidregs_w )
 
 static READ32_HANDLER( cps3_colourram_r )
 {
-	UINT16* src = (UINT16*)cps3_colourram;
+	uint16_t* src = (uint16_t*)cps3_colourram;
 
 	return src[offset*2+1] | (src[offset*2+0]<<16);
 }
@@ -2130,7 +3179,7 @@ static WRITE32_HANDLER( cps3_colourram_w )
 	}
 }
 
-static UINT32* cps3_mainram;
+static uint32_t* cps3_mainram;
 
 /* there are more unknown writes, but you get the idea */
 static ADDRESS_MAP_START( cps3_map, ADDRESS_SPACE_PROGRAM, 32 )
@@ -2159,6 +3208,8 @@ static ADDRESS_MAP_START( cps3_map, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x040C0060, 0x040C007f) AM_RAM AM_BASE(&cps3_fullscreenzoom)
 
 
+	AM_RANGE(0x040C0080, 0x040C0083) AM_WRITE(cps3_spritedma_w)
+
 	AM_RANGE(0x040C0094, 0x040C009b) AM_WRITE(cps3_characterdma_w)
 
 
@@ -2167,6 +3218,7 @@ static ADDRESS_MAP_START( cps3_map, ADDRESS_SPACE_PROGRAM, 32 )
 
 	AM_RANGE(0x040C0084, 0x040C0087) AM_WRITE(cram_bank_w)
 	AM_RANGE(0x040C0088, 0x040C008b) AM_WRITE(cram_gfxflash_bank_w)
+	AM_RANGE(0x040C008c, 0x040C008f) AM_WRITE(cps3_dma_irq_enable_w)
 
 	AM_RANGE(0x040e0000, 0x040e02ff) AM_READWRITE(cps3_sound_r, cps3_sound_w)
 
@@ -2179,21 +3231,34 @@ static ADDRESS_MAP_START( cps3_map, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x05000008, 0x0500000b) AM_WRITENOP // ?? every frame
 
 	AM_RANGE(0x05000a00, 0x05000a1f) AM_READ( cps3_unk_io_r ) // ?? every frame
+	AM_RANGE(0x05000a20, 0x05000a2f) AM_WRITE( cps3_unk_5000a_w )
+
+	AM_RANGE(0x05000c00, 0x05000c1f) AM_WRITE( cps3_outputs_w )
 
 	AM_RANGE(0x05001000, 0x05001203) AM_READWRITE( cps3_eeprom_r, cps3_eeprom_w )
 
 	AM_RANGE(0x05040000, 0x0504ffff) AM_READWRITE(cps3_ssram_r,cps3_ssram_w) // 'SS' RAM (Score Screen) (text tilemap + toles)
 	//0x25050020
+	AM_RANGE(0x05050000, 0x0505001f) AM_WRITE( cps3_ss_regs_w )
 	AM_RANGE(0x05050020, 0x05050023) AM_WRITE( cps3_ss_bank_base_w )
 	AM_RANGE(0x05050024, 0x05050027) AM_WRITE( cps3_ss_pal_base_w )
+	AM_RANGE(0x05050028, 0x0505002b) AM_WRITE( cps3_ss_regs_w )
 
 	AM_RANGE(0x05100000, 0x05100003) AM_WRITE( cps3_irq12_ack_w )
 	AM_RANGE(0x05110000, 0x05110003) AM_WRITE( cps3_irq10_ack_w )
+	AM_RANGE(0x05120000, 0x05120003) AM_WRITE( cps3_irq14_ack_w )
+	AM_RANGE(0x05130000, 0x05130003) AM_WRITE( cps3_irq6_ack_w )
 
 	AM_RANGE(0x05140000, 0x05140003) AM_READWRITE( cps3_cdrom_r, cps3_cdrom_w )
 
+	AM_RANGE(0x05150000, 0x05150003) AM_WRITE( cps3_unk_5150000_w )
+
 	AM_RANGE(0x06000000, 0x067fffff) AM_READWRITE( cps3_flash1_r, cps3_flash1_w ) /* Flash ROMs simm 1 */
 	AM_RANGE(0x06800000, 0x06ffffff) AM_READWRITE( cps3_flash2_r, cps3_flash2_w ) /* Flash ROMs simm 2 */
+
+	AM_RANGE(0x07ff0000, 0x07ff00ff) AM_WRITE( cps3_gll1_w )
+
+	AM_RANGE(0x40000000, 0x4000003f) AM_WRITE( cps3_unk_40000000_w )
 
 	AM_RANGE(0xc0000000, 0xc00003ff) AM_RAM_WRITE( cps3_0xc0000000_ram_w ) AM_BASE(&cps3_0xc0000000_ram) /* Executes code from here */
 ADDRESS_MAP_END
@@ -2272,6 +3337,34 @@ static const struct WD33C93interface scsi_intf =
 static void cps3_exit(running_machine &machine)
 {
 	wd33c93_exit(&scsi_intf);
+
+	/* All of the pointers below refer to memory owned by the machine's
+	   auto_alloc arena (or, for renderbuffer_bitmap, an auto_bitmap_alloc
+	   from that same arena).  That memory is freed when the machine is
+	   destroyed, but these are file-scope statics: in a libretro build the
+	   core DLL stays resident across a content close -> open cycle, so
+	   after teardown they would keep pointing at freed storage.  A frame
+	   update that runs during the close sequence (RetroArch issues a few
+	   more retro_run() calls while tearing the machine down) or before the
+	   next run's VIDEO_START has reassigned them would then dereference a
+	   dangling bitmap_t / buffer and fault.  This was observed as an
+	   intermittent segfault -- always at the VIDEO_UPDATE top-of-frame
+	   renderbuffer clear -- both when closing sfiii2n and when starting it
+	   again.  Null them here so a stale access reads NULL (guarded in
+	   VIDEO_UPDATE) instead of freed memory. */
+	renderbuffer_bitmap        = NULL;
+	cps3_mame_colours          = NULL;
+	cps3_char_ram              = NULL;
+	cps3_ss_ram                = NULL;
+	cps3_user4region           = NULL;
+	cps3_user5region           = NULL;
+	cps3_user5region_length    = 0;
+	decrypted_gamerom          = NULL;
+	cps3_0xc0000000_ram        = NULL;
+	cps3_0xc0000000_ram_decrypted = NULL;
+	cps3_eeprom                = NULL;
+	cps3_nops                  = NULL;
+	cps3_draw_list_count       = 0;
 }
 
 static MACHINE_START( cps3 )
@@ -2291,16 +3384,16 @@ static MACHINE_RESET( cps3 )
 
 static void precopy_to_flash(running_machine *machine)
 {
-	UINT32* romdata = (UINT32*)cps3_user4region;
+	uint32_t* romdata = (uint32_t*)cps3_user4region;
 	int i;
 	/* precopy program roms, ok, sfiii2 tests pass, others fail because of how the decryption affects testing */
 	for (i=0;i<0x800000;i+=4)
 	{
-		UINT32 data;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(0);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(1);
-		UINT8* ptr3 = (UINT8*)intelflash_getmemptr(2);
-		UINT8* ptr4 = (UINT8*)intelflash_getmemptr(3);
+		uint32_t data;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(0);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(1);
+		uint8_t* ptr3 = (uint8_t*)intelflash_getmemptr(2);
+		uint8_t* ptr4 = (uint8_t*)intelflash_getmemptr(3);
 
 		data = romdata[i/4];
 
@@ -2312,11 +3405,11 @@ static void precopy_to_flash(running_machine *machine)
 
 	for (i=0;i<0x800000;i+=4)
 	{
-		UINT32 data;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(4);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(5);
-		UINT8* ptr3 = (UINT8*)intelflash_getmemptr(6);
-		UINT8* ptr4 = (UINT8*)intelflash_getmemptr(7);
+		uint32_t data;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(4);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(5);
+		uint8_t* ptr3 = (uint8_t*)intelflash_getmemptr(6);
+		uint8_t* ptr4 = (uint8_t*)intelflash_getmemptr(7);
 
 		data = romdata[(0x800000+i)/4];
 
@@ -2328,19 +3421,17 @@ static void precopy_to_flash(running_machine *machine)
 
 	/* precopy gfx roms, good, tests pass */
 	{
-		UINT32 thebase, len = USER5REGION_LENGTH;
+		uint32_t thebase, len = USER5REGION_LENGTH;
 		int flashnum = 8;
 
-		romdata = (UINT32*)cps3_user5region;
+		romdata = (uint32_t*)cps3_user5region;
 		for (thebase = 0;thebase < len/2; thebase+=0x200000)
 		{
-		//  printf("flashnums %d. %d\n",flashnum, flashnum+1);
-
 			for (i=0;i<0x200000;i+=2)
 			{
-				UINT8* ptr1 = (UINT8*)intelflash_getmemptr(flashnum);
-				UINT8* ptr2 = (UINT8*)intelflash_getmemptr(flashnum+1);
-				UINT32 dat = romdata[(thebase+i)/2];
+				uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(flashnum);
+				uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(flashnum+1);
+				uint32_t dat = romdata[(thebase+i)/2];
 
 				ptr1[BYTE_XOR_LE(i+1)] =  (dat&0xff000000)>>24;
 				ptr2[BYTE_XOR_LE(i+1)] =  (dat&0x00ff0000)>>16;
@@ -2357,21 +3448,20 @@ static void precopy_to_flash(running_machine *machine)
 // make a copy in the regions we execute code / draw gfx from
 static void copy_from_nvram(running_machine *machine)
 {
-	UINT32* romdata = (UINT32*)cps3_user4region;
-	UINT32* romdata2 = (UINT32*)decrypted_gamerom;
+	uint32_t* romdata = (uint32_t*)cps3_user4region;
+	uint32_t* romdata2 = (uint32_t*)decrypted_gamerom;
 	int i;
 	/* copy + decrypt program roms which have been loaded from flashroms/nvram */
 	for (i=0;i<0x800000;i+=4)
 	{
-		UINT32 data;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(0);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(1);
-		UINT8* ptr3 = (UINT8*)intelflash_getmemptr(2);
-		UINT8* ptr4 = (UINT8*)intelflash_getmemptr(3);
+		uint32_t data;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(0);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(1);
+		uint8_t* ptr3 = (uint8_t*)intelflash_getmemptr(2);
+		uint8_t* ptr4 = (uint8_t*)intelflash_getmemptr(3);
 
 		data = ((ptr1[i/4]<<24) | (ptr2[i/4]<<16) | (ptr3[i/4]<<8) | (ptr4[i/4]<<0));
 
-	//  printf("%08x %08x %08x %08x\n",romdata[i/4],data, romdata2[i/4], data ^ cps3_mask(i+0x6000000, cps3_key1, cps3_key2));
 		romdata[i/4] = data;
 		romdata2[i/4] = data ^ cps3_mask(i+0x6000000, cps3_key1, cps3_key2);
 
@@ -2382,40 +3472,36 @@ static void copy_from_nvram(running_machine *machine)
 
 	for (i=0;i<0x800000;i+=4)
 	{
-		UINT32 data;
-		UINT8* ptr1 = (UINT8*)intelflash_getmemptr(4);
-		UINT8* ptr2 = (UINT8*)intelflash_getmemptr(5);
-		UINT8* ptr3 = (UINT8*)intelflash_getmemptr(6);
-		UINT8* ptr4 = (UINT8*)intelflash_getmemptr(7);
+		uint32_t data;
+		uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(4);
+		uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(5);
+		uint8_t* ptr3 = (uint8_t*)intelflash_getmemptr(6);
+		uint8_t* ptr4 = (uint8_t*)intelflash_getmemptr(7);
 
 		data = ((ptr1[i/4]<<24) | (ptr2[i/4]<<16) | (ptr3[i/4]<<8) | (ptr4[i/4]<<0));
 
-	//  printf("%08x %08x %08x %08x\n",romdata[i/4],data, romdata2[i/4],  data ^ cps3_mask(i+0x6800000, cps3_key1, cps3_key2) );
 		romdata[i/4] = data;
 		romdata2[i/4] = data ^ cps3_mask(i+0x6800000, cps3_key1, cps3_key2);
 	}
 
 	/* copy gfx from loaded flashroms to user reigon 5, where it's used */
 	{
-		UINT32 thebase, len = USER5REGION_LENGTH;
+		uint32_t thebase, len = USER5REGION_LENGTH;
 		int flashnum = 8;
 		int countoffset = 0;
 
-		romdata = (UINT32*)cps3_user5region;
+		romdata = (uint32_t*)cps3_user5region;
 		for (thebase = 0;thebase < len/2; thebase+=0x200000)
 		{
-		//  printf("flashnums %d. %d\n",flashnum, flashnum+1);
-
 			for (i=0;i<0x200000;i+=2)
 			{
-				UINT8* ptr1 = (UINT8*)intelflash_getmemptr(flashnum);
-				UINT8* ptr2 = (UINT8*)intelflash_getmemptr(flashnum+1);
-				UINT32 dat = (ptr1[i+0]<<8) |
+				uint8_t* ptr1 = (uint8_t*)intelflash_getmemptr(flashnum);
+				uint8_t* ptr2 = (uint8_t*)intelflash_getmemptr(flashnum+1);
+				uint32_t dat = (ptr1[i+0]<<8) |
 					         (ptr1[i+1]<<24) |
 							 (ptr2[i+0]<<0) |
 							 (ptr2[i+1]<<16);
 
-				//printf("%08x %08x\n",romdata[countoffset],dat);
 				romdata[countoffset] = dat;
 
 				countoffset++;
@@ -2423,24 +3509,6 @@ static void copy_from_nvram(running_machine *machine)
 			flashnum+=2;
 		}
 	}
-
-
-	/*
-    {
-        FILE *fp;
-        const char *gamename = machine->gamedrv->name;
-        char filename[256];
-        sprintf(filename, "%s_bios.dump", gamename);
-
-        fp=fopen(filename, "w+b");
-        if (fp)
-        {
-            fwrite(rom, 0x080000, 1, fp);
-            fclose(fp);
-        }
-    }
-    */
-
 }
 
 static NVRAM_HANDLER( cps3 )
@@ -2449,14 +3517,12 @@ static NVRAM_HANDLER( cps3 )
 
 	if (read_or_write)
 	{
-		//printf("read_write\n");
 		mame_fwrite(file, cps3_eeprom, 0x400);
 		for (i=0;i<48;i++)
 			nvram_handler_intelflash( machine, i, file, read_or_write );
 	}
 	else if (file)
 	{
-		//printf("file\n");
 		mame_fread(file, cps3_eeprom, 0x400);
 		for (i=0;i<48;i++)
 			nvram_handler_intelflash( machine, i, file, read_or_write );
@@ -2465,7 +3531,6 @@ static NVRAM_HANDLER( cps3 )
 	}
 	else
 	{
-		//printf("nothing?\n");
 		precopy_to_flash(machine);  // attempt to copy data from user regions into flash roms (incase this is a NOCD set)
 		copy_from_nvram(machine); // copy data from flashroms back into user regions + decrypt into regions we execute/draw from.
 	}
@@ -2476,7 +3541,7 @@ static NVRAM_HANDLER( cps3 )
 
 
 
-static int cps3_dma_callback(UINT32 src, UINT32 dst, UINT32 data, int size)
+static int cps3_dma_callback(uint32_t src, uint32_t dst, uint32_t data, int size)
 {
 	/*
       on the actual CPS3 hardware the SH2 DMA bypasses the encryption.
@@ -2511,10 +3576,6 @@ static int cps3_dma_callback(UINT32 src, UINT32 dst, UINT32 data, int size)
 	{
 		int offs = (src&0x07fffff)>>2;
 		if (!cps3_altEncryption) data = data ^ cps3_mask(0x6800000+offs*4, cps3_key1, cps3_key2);
-	}
-	else
-	{
-		//printf("%s :src %08x, dst %08x, returning %08x\n", cpuexec_describe_context(machine), src, dst, data);
 	}
 
 	/* I doubt this is endian safe.. needs checking / fixing */
@@ -2832,7 +3893,7 @@ ROM_END
 
     DEVELOPMENT VERSION add 0x70 mask!
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fec8/4]^=0x00000001; // region hack (clear jpn)
 
     rom[0x1fec8/4]^=0x00000004; // region
@@ -2857,7 +3918,7 @@ ROM_END
 
     DEVELOPMENT VERSION add 0x70 mask!
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fec8/4]^=0x00000001; // region (clear jpn)
     rom[0x1fec8/4]^=0x00000002; // region
     rom[0x1fec8/4]^=0x00000070; // DEV mode
@@ -2878,7 +3939,7 @@ ROM_END
     OCEANIA 7
     ASIA NCD 8
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fed8/4]^=0x00000001; // clear region to 0 (invalid)
     rom[0x1fed8/4]^=0x00000008; // region 8 - ASIA NO CD - doesn't actually skip the CD
                                 // test on startup, only during game, must be another flag
@@ -2903,7 +3964,7 @@ ROM_END
 
     // bios rom also lists korea, but game rom does not.
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fec8/4]^=0x00000001; // region (clear region)
     rom[0x1fec8/4]^=0x00000008; // region
     rom[0x1fecc/4]^=0x01000000; // nocd - this ONLY skips the cd check in the bios test
@@ -2925,7 +3986,7 @@ ROM_END
     OCEANIA 7
     ASIA 8
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fec8/4]^=0x00000001; // region (clear region)
     rom[0x1fec8/4]^=0x00000008; // region
     rom[0x1fecc/4]^=0x01000000; // nocd - this ONLY skips the cd check in the bios test
@@ -2947,7 +4008,7 @@ ROM_END
     BRAZIL 6
     OCEANIA 7
 
-    UINT32 *rom =  (UINT32*)memory_region ( machine, "user1" );
+    uint32_t *rom =  (uint32_t*)memory_region ( machine, "user1" );
     rom[0x1fec8/4]^=0x00000004; // region (clear region)
     rom[0x1fec8/4]^=0x00000001; // region
     rom[0x1fecc/4]^=0x01000000; // nocd

@@ -45,7 +45,33 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 //#include <stdlib.h>
+
+
+/***************************************************************************
+    POINTER-WIDTH DETECTION
+***************************************************************************/
+
+/* Auto-detect 64-bit pointer ABI from the compiler. PTR64 was historically
+ * set via -D in the Makefile; sources should not have to depend on a build
+ * flag to know how wide their own pointers are. If something upstream still
+ * defines PTR64 manually we honour it; otherwise we figure it out here.
+ *
+ * Predicates, in order of preference:
+ *   - __SIZEOF_POINTER__ : GCC >= 4.5, Clang >= 3.0, MSVC >= 2017
+ *   - _WIN64             : MSVC fallback for older versions
+ *   - __LP64__ / _LP64   : older Unix toolchains
+ *
+ * The choice is target-aware (it asks the compiler about its target ABI),
+ * which is strictly better than uname -m on the build host. */
+#ifndef PTR64
+  #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+    #define PTR64 1
+  #elif defined(_WIN64) || defined(__LP64__) || defined(_LP64)
+    #define PTR64 1
+  #endif
+#endif
 
 
 /***************************************************************************
@@ -101,37 +127,10 @@
     FUNDAMENTAL TYPES
 ***************************************************************************/
 
-/* These types work on most modern compilers; however, OSD code can
-   define their own by setting OSD_TYPES_DEFINED */
-
-#ifndef OSD_TYPES_DEFINED
-
-/* 8-bit values */
-typedef unsigned char						UINT8;
-typedef signed char 						INT8;
-
-/* 16-bit values */
-typedef unsigned short						UINT16;
-typedef signed short						INT16;
-
-/* 32-bit values */
-#ifndef _WINDOWS_H
-typedef unsigned int						UINT32;
-typedef signed int							INT32;
-#endif
-
-/* 64-bit values */
-#ifndef _WINDOWS_H
-#ifdef _MSC_VER
-typedef signed __int64						INT64;
-typedef unsigned __int64					UINT64;
-#else
-__extension__ typedef unsigned long long	UINT64;
-__extension__ typedef signed long long		INT64;
-#endif
-#endif
-
-#endif
+/* The fundamental integer types are <stdint.h>'s exact-width types
+   (uint8_t/int8_t .. uint64_t/int64_t), included near the top of this
+   header. The legacy UINT8../INT8.. aliases have been removed now that
+   all code uses the stdint spellings directly. */
 
 
 
@@ -174,9 +173,9 @@ __extension__ typedef signed long long		INT64;
 
 
 /* Concatenate/extract 32-bit halves of 64-bit values */
-#define CONCAT_64(hi,lo)	(((UINT64)(hi) << 32) | (UINT32)(lo))
-#define EXTRACT_64HI(val)	((UINT32)((val) >> 32))
-#define EXTRACT_64LO(val)	((UINT32)(val))
+#define CONCAT_64(hi,lo)	(((uint64_t)(hi) << 32) | (uint32_t)(lo))
+#define EXTRACT_64HI(val)	((uint32_t)((val) >> 32))
+#define EXTRACT_64LO(val)	((uint32_t)(val))
 
 
 /* MINGW has adopted the MSVC formatting for 64-bit ints as of gcc 4.4 */
@@ -192,19 +191,19 @@ __extension__ typedef signed long long		INT64;
 
 
 /* Macros for normalizing data into big or little endian formats */
-#define FLIPENDIAN_INT16(x)	(((((UINT16) (x)) >> 8) | ((x) << 8)) & 0xffff)
-#define FLIPENDIAN_INT32(x)	((((UINT32) (x)) << 24) | (((UINT32) (x)) >> 24) | \
-	(( ((UINT32) (x)) & 0x0000ff00) << 8) | (( ((UINT32) (x)) & 0x00ff0000) >> 8))
+#define FLIPENDIAN_INT16(x)	(((((uint16_t) (x)) >> 8) | ((x) << 8)) & 0xffff)
+#define FLIPENDIAN_INT32(x)	((((uint32_t) (x)) << 24) | (((uint32_t) (x)) >> 24) | \
+	(( ((uint32_t) (x)) & 0x0000ff00) << 8) | (( ((uint32_t) (x)) & 0x00ff0000) >> 8))
 #define FLIPENDIAN_INT64(x)	\
 	(												\
-		(((((UINT64) (x)) >> 56) & ((UINT64) 0xFF)) <<  0)	|	\
-		(((((UINT64) (x)) >> 48) & ((UINT64) 0xFF)) <<  8)	|	\
-		(((((UINT64) (x)) >> 40) & ((UINT64) 0xFF)) << 16)	|	\
-		(((((UINT64) (x)) >> 32) & ((UINT64) 0xFF)) << 24)	|	\
-		(((((UINT64) (x)) >> 24) & ((UINT64) 0xFF)) << 32)	|	\
-		(((((UINT64) (x)) >> 16) & ((UINT64) 0xFF)) << 40)	|	\
-		(((((UINT64) (x)) >>  8) & ((UINT64) 0xFF)) << 48)	|	\
-		(((((UINT64) (x)) >>  0) & ((UINT64) 0xFF)) << 56)		\
+		(((((uint64_t) (x)) >> 56) & ((uint64_t) 0xFF)) <<  0)	|	\
+		(((((uint64_t) (x)) >> 48) & ((uint64_t) 0xFF)) <<  8)	|	\
+		(((((uint64_t) (x)) >> 40) & ((uint64_t) 0xFF)) << 16)	|	\
+		(((((uint64_t) (x)) >> 32) & ((uint64_t) 0xFF)) << 24)	|	\
+		(((((uint64_t) (x)) >> 24) & ((uint64_t) 0xFF)) << 32)	|	\
+		(((((uint64_t) (x)) >> 16) & ((uint64_t) 0xFF)) << 40)	|	\
+		(((((uint64_t) (x)) >>  8) & ((uint64_t) 0xFF)) << 48)	|	\
+		(((((uint64_t) (x)) >>  0) & ((uint64_t) 0xFF)) << 56)		\
 	)
 
 #ifdef MSB_FIRST

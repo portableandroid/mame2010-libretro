@@ -87,66 +87,6 @@ osd_ticks_t osd_ticks_per_second(void)
 }
 
 //============================================================
-//  osd_sleep
-//============================================================
-
-void osd_sleep(osd_ticks_t duration)
-{
-#ifdef WIN32
-	DWORD msec;
-
-	// make sure we've computed ticks_per_second
-	if (ticks_per_second == 0)
-		(void)osd_ticks();
-
-	// convert to milliseconds, rounding down
-	msec = (DWORD)(duration * 1000 / ticks_per_second);
-
-	// only sleep if at least 2 full milliseconds
-	if (msec >= 2)
-	{
-		HANDLE current_thread = GetCurrentThread();
-		int old_priority = GetThreadPriority(current_thread);
-
-		// take a couple of msecs off the top for good measure
-		msec -= 2;
-
-		// bump our thread priority super high so that we get
-		// priority when we need it
-		SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL);
-		Sleep(msec);
-		SetThreadPriority(current_thread, old_priority);
-	}
-#elif defined(WIIU)
-	UINT32 msec;
-
-	// convert to milliseconds, rounding down
-	msec = (UINT32)(duration * 1000 / osd_ticks_per_second());
-
-	// only sleep if at least 2 full milliseconds
-	if (msec >= 2)
-	{
-		// take a couple of msecs off the top for good measure
-		msec -= 2;
-		//usleep(msec*1000);
-	}
-#else
-	UINT32 msec;
-
-	// convert to milliseconds, rounding down
-	msec = (UINT32)(duration * 1000 / osd_ticks_per_second());
-
-	// only sleep if at least 2 full milliseconds
-	if (msec >= 2)
-	{
-		// take a couple of msecs off the top for good measure
-		msec -= 2;
-		usleep(msec*1000);
-	}
-#endif
-}
-
-//============================================================
 //  osd_num_processors
 //============================================================
 
@@ -383,13 +323,13 @@ osd_directory_entry *osd_stat(const char *path)
 {
 	int err;
 	osd_directory_entry *result = NULL;
-	#if defined(SDLMAME_NO64BITIO) || defined(ANDROID) || defined(WIN32) || defined(SDLMAME_BSD)
+	#if defined(SDLMAME_NO64BITIO) || defined(ANDROID) || defined(WIN32) || defined(SDLMAME_BSD) || defined(__APPLE__)
 	struct stat st;
 	#else
 	struct stat64 st;
 	#endif
 
-	#if defined(SDLMAME_NO64BITIO) || defined(ANDROID) || defined(WIN32) || defined(SDLMAME_BSD)
+	#if defined(SDLMAME_NO64BITIO) || defined(ANDROID) || defined(WIN32) || defined(SDLMAME_BSD) || defined(__APPLE__)
 	err = stat(path, &st);
 	#else
 	err = stat64(path, &st);
@@ -403,7 +343,7 @@ osd_directory_entry *osd_stat(const char *path)
 	strcpy(((char *) result) + sizeof(*result), path);
 	result->name = ((char *) result) + sizeof(*result);
 	result->type = S_ISDIR(st.st_mode) ? ENTTYPE_DIR : ENTTYPE_FILE;
-	result->size = (UINT64)st.st_size;
+	result->size = (uint64_t)st.st_size;
 
 	return result;
 }

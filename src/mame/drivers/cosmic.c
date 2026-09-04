@@ -224,7 +224,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 2, 3, 0); break;
 					}
 					else
-						sample_start(state->samples, 2, 3, 0); break;
+						sample_start(state->samples, 2, 3, 0);
+					break;
 
 				case 3:
 					if (sample_playing(state->samples, 3))
@@ -233,7 +234,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 3, 4, 0); break;
 					}
 					else
-						sample_start(state->samples, 3, 4, 0); break;
+						sample_start(state->samples, 3, 4, 0);
+					break;
 
 				case 4:
 					if (sample_playing(state->samples, 4))
@@ -242,7 +244,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 4, 5, 0); break;
 					}
 					else
-						sample_start(state->samples, 4, 5, 0); break;
+						sample_start(state->samples, 4, 5, 0);
+					break;
 
 				case 5:
 					if (sample_playing(state->samples, 5))
@@ -251,7 +254,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 5, 6, 0); break;
 					}
 					else
-						sample_start(state->samples, 5, 6, 0); break;
+						sample_start(state->samples, 5, 6, 0);
+					break;
 
 				case 6:
 					if (sample_playing(state->samples, 6))
@@ -260,7 +264,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 6, 7, 0); break;
 					}
 					else
-						sample_start(state->samples, 6, 7, 0); break;
+						sample_start(state->samples, 6, 7, 0);
+					break;
 
 				case 7:
 					if (sample_playing(state->samples, 7))
@@ -269,7 +274,8 @@ static WRITE8_HANDLER( cosmica_sound_output_w )
 						sample_start(state->samples, 7, 8, 0); break;
 					}
 					else
-						sample_start(state->samples, 7, 8, 0); break;
+						sample_start(state->samples, 7, 8, 0);
+					break;
 				}
 			}
 
@@ -1581,14 +1587,14 @@ static DRIVER_INIT( cosmicg )
 	/* Program ROMs have data pins connected different from normal */
 	cosmic_state *state = (cosmic_state *)machine->driver_data;
 	offs_t offs, len;
-	UINT8 *rom;
+	uint8_t *rom;
 	len = memory_region_length(machine, "maincpu");
 	rom = memory_region(machine, "maincpu");
 	for (offs = 0; offs < len; offs++)
 	{
-		UINT8 scrambled = rom[offs];
+		uint8_t scrambled = rom[offs];
 
-		UINT8 normal = (scrambled >> 3 & 0x11)
+		uint8_t normal = (scrambled >> 3 & 0x11)
 					  | (scrambled >> 1 & 0x22)
 					  | (scrambled << 1 & 0x44)
 					  | (scrambled << 3 & 0x88);

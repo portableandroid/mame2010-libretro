@@ -115,7 +115,7 @@ typedef struct
 {
 	float	diffuse;
 	float	ambient;
-	UINT32	specular_control;
+	uint32_t	specular_control;
 	float	specular_scale;
 } texture_parameter;
 
@@ -123,33 +123,57 @@ typedef struct
 {
 	void *				next;
 	poly_vertex			v[3];
-	UINT16				z;
-	UINT16				texheader[4];
-	UINT8				luma;
-	INT16				viewport[4];
-	INT16				center[2];
+	uint16_t				z;
+	uint16_t				texheader[4];
+	uint8_t				luma;
+	int16_t				viewport[4];
+	int16_t				center[2];
+	int32_t				texlod;
 } triangle;
 
 typedef struct
 {
 	poly_vertex			v[4];
-	UINT16				z;
-	UINT16				texheader[4];
-	UINT8				luma;
+	uint16_t				z;
+	uint16_t				texheader[4];
+	uint8_t				luma;
 } _quad_m2;
 
 typedef struct _poly_extra_data poly_extra_data;
 struct _poly_extra_data
 {
-	UINT32		lumabase;
-	UINT32		colorbase;
-	UINT32 *	texsheet;
-	UINT32		texwidth;
-	UINT32		texheight;
-	UINT32		texx, texy;
-	UINT8		texmirrorx;
-	UINT8		texmirrory;
+	uint32_t		lumabase;
+	uint32_t		colorbase;
+	uint32_t *	texsheet[2];	/* alternating per-mip-level texture sheets */
+	uint32_t		texwidth;
+	uint32_t		texheight;
+	uint32_t		texx, texy;
+	int32_t		texlod;		/* base texture LOD for this polygon */
+	uint8_t		texmirrorx;
+	uint8_t		texmirrory;
+	uint8_t		texwrapx;	/* smooth wrap horizontally */
+	uint8_t		texwrapy;	/* smooth wrap vertically */
+	uint8_t		luma;
 };
+
+/* contrast/black-level translator applied to all final pixel colors.
+ * The video DAC effectively crushes the bottom of the 0..255 range to
+ * black and rescales the rest, which the original simple pal5bit() path
+ * does not do; without it everything looks washed out.  Exposed via
+ * model2.h so the driver palette path (chcolor) can use it too. */
+uint8_t model2_gamma_table[256];
+
+static void model2_build_gamma_table(void)
+{
+	int i;
+	for (i = 0; i < 256; i++)
+	{
+		double v = ((double)i - 64.0) * 255.0 / 191.0;
+		if (v < 0.0) v = 0.0;
+		if (v > 255.0) v = 255.0;
+		model2_gamma_table[i] = (uint8_t)v;
+	}
+}
 
 
 /*******************************************
@@ -210,12 +234,15 @@ INLINE void vector_cross3( poly_vertex *dst, poly_vertex *v0, poly_vertex *v1, p
 	dst->pz = (p1.x * p2.y) - (p1.y * p2.x);
 }
 
-/* 1.8.23 float to 4.12 float converter, courtesy of Aaron Giles */
-static UINT16 float_to_zval( float floatval )
+/* 1.8.23 float to 4.12 float converter, courtesy of Aaron Giles.
+ * z_adjust is the raw IEEE float bit pattern of the polygon z-sort base;
+ * its exponent byte is used as the conversion's reference exponent so
+ * different z ranges sort consistently. */
+static uint16_t float_to_zval( float floatval, int32_t z_adjust )
 {
-	INT32 fpint = f2u(floatval);
-	INT32 exponent = ((fpint >> 23) & 0xff) - 127;
-	UINT32 mantissa = fpint & 0x7fffff;
+	int32_t fpint = f2u(floatval);
+	int32_t exponent = ((fpint >> 23) & 0xff) - ((z_adjust >> 23) & 0xff);
+	uint32_t mantissa = fpint & 0x7fffff;
 
 	/* round the low bits and reduce to 12 */
 	mantissa += 0x400;
@@ -243,11 +270,11 @@ static UINT16 float_to_zval( float floatval )
 	return 0xffff;
 }
 
-static INT32 clip_polygon(poly_vertex *v, INT32 num_vertices, plane *cp, poly_vertex *vout)
+static int32_t clip_polygon(poly_vertex *v, int32_t num_vertices, plane *cp, poly_vertex *vout)
 {
 	poly_vertex *cur, *out;
 	float	curdot, nextdot, scale;
-	INT32	i, curin, nextin, nextvert, outcount;
+	int32_t	i, curin, nextin, nextvert, outcount;
 
 	outcount = 0;
 
@@ -275,8 +302,8 @@ static INT32 clip_polygon(poly_vertex *v, INT32 num_vertices, plane *cp, poly_ve
 			out[outcount].x = cur->x + ((v[nextvert].x - cur->x) * scale);
 			out[outcount].y = cur->y + ((v[nextvert].y - cur->y) * scale);
 			out[outcount].pz = cur->pz + ((v[nextvert].pz - cur->pz) * scale);
-			out[outcount].pu = (UINT16)((float)cur->pu + (((float)v[nextvert].pu - (float)cur->pu) * scale));
-			out[outcount].pv = (UINT16)((float)cur->pv + (((float)v[nextvert].pv - (float)cur->pv) * scale));
+			out[outcount].pu = (uint16_t)((float)cur->pu + (((float)v[nextvert].pu - (float)cur->pu) * scale));
+			out[outcount].pv = (uint16_t)((float)cur->pv + (((float)v[nextvert].pv - (float)cur->pv) * scale));
             outcount++;
         }
 
@@ -300,25 +327,25 @@ static INT32 clip_polygon(poly_vertex *v, INT32 num_vertices, plane *cp, poly_ve
 
 typedef struct
 {
-	UINT32				mode;				/* bit 0 = Test Mode, bit 2 = Switch 60Hz(1)/30Hz(0) operation */
-	UINT16 *			texture_rom;		/* Texture ROM pointer */
-	UINT16 *			texture_ram;		/* Texture RAM pointer */
-	UINT8 *				log_ram;			/* Log RAM pointer */
-	INT16				viewport[4];		/* View port (startx,starty,endx,endy) */
-	INT16				center[4][2];		/* Centers (eye 0[x,y],1[x,y],2[x,y],3[x,y]) */
-	UINT16				center_sel;			/* Selected center */
-	UINT32				reverse;			/* Left/Right Reverse */
-	float				z_adjust;			/* ZSort Mode */
+	uint32_t				mode;				/* bit 0 = Test Mode, bit 2 = Switch 60Hz(1)/30Hz(0) operation */
+	uint16_t *			texture_rom;		/* Texture ROM pointer */
+	uint16_t *			texture_ram;		/* Texture RAM pointer */
+	uint8_t *				log_ram;			/* Log RAM pointer */
+	int16_t				viewport[4];		/* View port (startx,starty,endx,endy) */
+	int16_t				center[4][2];		/* Centers (eye 0[x,y],1[x,y],2[x,y],3[x,y]) */
+	uint16_t				center_sel;			/* Selected center */
+	uint32_t				reverse;			/* Left/Right Reverse */
+	int32_t				z_adjust;			/* ZSort Mode (raw IEEE float bit pattern; the high byte holds the exponent reference used by float_to_zval) */
 	float				triangle_z;			/* Current Triangle z value */
-	UINT8				master_z_clip;		/* Master Z-Clip value */
-	UINT32				cur_command;		/* Current command */
-	UINT32				command_buffer[32];	/* Command buffer */
-	UINT32				command_index;		/* Command buffer index */
+	uint8_t				master_z_clip;		/* Master Z-Clip value */
+	uint32_t				cur_command;		/* Current command */
+	uint32_t				command_buffer[32];	/* Command buffer */
+	uint32_t				command_index;		/* Command buffer index */
 	triangle *			tri_list;			/* Triangle list */
-	UINT32				tri_list_index;		/* Triangle list index */
+	uint32_t				tri_list_index;		/* Triangle list index */
 	triangle **			tri_sorted_list;	/* Sorted Triangle list */
-	UINT16				min_z;				/* Minimum sortable Z value */
-	UINT16				max_z;				/* Maximum sortable Z value */
+	uint16_t				min_z;				/* Minimum sortable Z value */
+	uint16_t				max_z;				/* Maximum sortable Z value */
 
 } raster_state;
 
@@ -330,13 +357,13 @@ static raster_state raster;
  *
  *******************************************/
 
-static void model2_3d_init( running_machine *machine, UINT16 *texture_rom )
+static void model2_3d_init( running_machine *machine, uint16_t *texture_rom )
 {
 	memset( &raster, 0, sizeof( raster_state ) );
 
 	raster.texture_rom = texture_rom;
-	raster.texture_ram = auto_alloc_array(machine, UINT16, 0x10000);
-	raster.log_ram = auto_alloc_array(machine, UINT8, 0x40000);
+	raster.texture_ram = auto_alloc_array(machine, uint16_t, 0x10000);
+	raster.log_ram = auto_alloc_array(machine, uint8_t, 0x40000);
 	raster.tri_list = auto_alloc_array(machine, triangle, MAX_TRIANGLES);
 	raster.tri_sorted_list = auto_alloc_array(machine, triangle *, 0x10000);
 }
@@ -347,7 +374,7 @@ static void model2_3d_init( running_machine *machine, UINT16 *texture_rom )
  *
  *******************************************/
 
-void model2_3d_set_zclip( UINT8 clip )
+void model2_3d_set_zclip( uint8_t clip )
 {
 	raster.master_z_clip = clip;
 }
@@ -358,12 +385,13 @@ void model2_3d_set_zclip( UINT8 clip )
  *
  *******************************************/
 
-static void model2_3d_process_quad( UINT32 attr )
+static void model2_3d_process_quad( uint32_t attr )
 {
 	_quad_m2	object;
-	UINT16		*th, *tp;
-	INT32		tho;
-	UINT32		cull, i;
+	uint16_t		*th, *tp;
+	int32_t		tho;
+	int32_t		texlod;
+	uint32_t		cull, i;
 	float		zvalue;
 	float		min_z, max_z;
 
@@ -442,6 +470,13 @@ static void model2_3d_process_quad( UINT32 attr )
 	/* set the luma value of this quad */
 	object.luma = (raster.command_buffer[9] >> 15) & 0xFF;
 
+	/* set the texture LOD of this polygon: a signed offset around 0x3f80
+	 * (the IEEE 1.0 exponent biased into the 8-bit log field) plus a
+	 * per-poly log-RAM lookup that the geo engine pre-computes for the
+	 * mip-level selection done in the textured rasterizer */
+	texlod  = ((int32_t)(raster.command_buffer[10] >> 8) & 0x7f80) - 0x3f80;
+	texlod += raster.log_ram[raster.command_buffer[10] & 0x7fff];
+
 	/* determine wether we can cull this quad */
 	cull = 0;
 
@@ -457,8 +492,10 @@ static void model2_3d_process_quad( UINT32 attr )
 	if ( ((attr >> 8) & 3) == 0 )
 		cull = 1;
 
-	/* if the minimum z value is bigger than the master z clip value, don't render */
-	if ( (INT32)(1.0/min_z) > raster.master_z_clip )
+	/* if the minimum z value is bigger than the master z clip value, don't render.
+	 * 0xff is the "disable z clipping" signal - skip the test then, otherwise
+	 * close-up scenes (e.g. menu previews) where (1/depth) > 255 get killed. */
+	if ( raster.master_z_clip != 0xff && (int32_t)(1.0/min_z) > raster.master_z_clip )
 		cull = 1;
 
 	/* if the maximum z value is < 0 then we can safely clip the entire polygon */
@@ -485,7 +522,7 @@ static void model2_3d_process_quad( UINT32 attr )
 
 	if ( cull == 0 )
 	{
-		INT32		clipped_verts;
+		int32_t		clipped_verts;
 		poly_vertex	verts[10];
 		plane		clip_plane;
 
@@ -502,7 +539,7 @@ static void model2_3d_process_quad( UINT32 attr )
 			triangle *ztri;
 
 			/* adjust and set the object z-sort value */
-			object.z = float_to_zval( zvalue + raster.z_adjust );
+			object.z = float_to_zval( zvalue, raster.z_adjust );
 
 			/* get our list read to add the triangles */
 			ztri = raster.tri_sorted_list[object.z];
@@ -518,12 +555,16 @@ static void model2_3d_process_quad( UINT32 attr )
 			{
 				triangle	*tri;
 
-				tri = &raster.tri_list[raster.tri_list_index++];
-
+				/* skip this triangle if the list is full rather than
+				 * killing the process via fatalerror.  At worst we lose
+				 * polygons past the cap on a single frame; the next frame
+				 * rebuilds the list from scratch and recovers. */
 				if ( raster.tri_list_index >= MAX_TRIANGLES )
 				{
-					fatalerror( "SEGA 3D: Max triangle limit exceeded\n" );
+					logerror( "SEGA 3D: Max triangle limit exceeded, dropping\n" );
+					break;
 				}
+				tri = &raster.tri_list[raster.tri_list_index++];
 
 				/* copy the object information */
 				tri->z = object.z;
@@ -532,6 +573,7 @@ static void model2_3d_process_quad( UINT32 attr )
 				tri->texheader[2] = object.texheader[2];
 				tri->texheader[3] = object.texheader[3];
 				tri->luma = object.luma;
+				tri->texlod = texlod;
 
 				/* set the viewport */
 				tri->viewport[0] = raster.viewport[0];
@@ -598,12 +640,13 @@ static void model2_3d_process_quad( UINT32 attr )
 	}
 }
 
-static void model2_3d_process_triangle( UINT32 attr )
+static void model2_3d_process_triangle( uint32_t attr )
 {
 	triangle	object;
-	UINT16		*th, *tp;
-	INT32		tho;
-	UINT32		cull, i;
+	uint16_t		*th, *tp;
+	int32_t		tho;
+	int32_t		texlod;
+	uint32_t		cull, i;
 	float		zvalue;
 	float		min_z, max_z;
 
@@ -678,6 +721,13 @@ static void model2_3d_process_triangle( UINT32 attr )
 	/* set the luma value of this quad */
 	object.luma = (raster.command_buffer[9] >> 15) & 0xFF;
 
+	/* set the texture LOD of this polygon: a signed offset around 0x3f80
+	 * (the IEEE 1.0 exponent biased into the 8-bit log field) plus a
+	 * per-poly log-RAM lookup that the geo engine pre-computes for the
+	 * mip-level selection done in the textured rasterizer */
+	texlod  = ((int32_t)(raster.command_buffer[10] >> 8) & 0x7f80) - 0x3f80;
+	texlod += raster.log_ram[raster.command_buffer[10] & 0x7fff];
+
 	/* determine wether we can cull this quad */
 	cull = 0;
 
@@ -693,8 +743,9 @@ static void model2_3d_process_triangle( UINT32 attr )
 	if ( ((attr >> 8) & 3) == 0 )
 		cull = 1;
 
-	/* if the minimum z value is bigger than the master z clip value, don't render */
-	if ( (INT32)(1.0/min_z) > raster.master_z_clip )
+	/* if the minimum z value is bigger than the master z clip value, don't render.
+	 * 0xff means "no z clipping" - skip the test then. */
+	if ( raster.master_z_clip != 0xff && (int32_t)(1.0/min_z) > raster.master_z_clip )
 		cull = 1;
 
 	/* if the maximum z value is < 0 then we can safely clip the entire polygon */
@@ -722,7 +773,7 @@ static void model2_3d_process_triangle( UINT32 attr )
 	/* if we're not culling, do z-clip and add to out triangle list */
 	if ( cull == 0 )
 	{
-		INT32		clipped_verts;
+		int32_t		clipped_verts;
 		poly_vertex	verts[10];
 		plane		clip_plane;
 
@@ -739,7 +790,7 @@ static void model2_3d_process_triangle( UINT32 attr )
 			triangle *ztri;
 
 			/* adjust and set the object z-sort value */
-			object.z = float_to_zval( zvalue + raster.z_adjust );
+			object.z = float_to_zval( zvalue, raster.z_adjust );
 
 			/* get our list read to add the triangles */
 			ztri = raster.tri_sorted_list[object.z];
@@ -755,12 +806,16 @@ static void model2_3d_process_triangle( UINT32 attr )
 			{
 				triangle	*tri;
 
-				tri = &raster.tri_list[raster.tri_list_index++];
-
+				/* skip this triangle if the list is full rather than
+				 * killing the process via fatalerror.  At worst we lose
+				 * polygons past the cap on a single frame; the next frame
+				 * rebuilds the list from scratch and recovers. */
 				if ( raster.tri_list_index >= MAX_TRIANGLES )
 				{
-					fatalerror( "SEGA 3D: Max triangle limit exceeded\n" );
+					logerror( "SEGA 3D: Max triangle limit exceeded, dropping\n" );
+					break;
 				}
+				tri = &raster.tri_list[raster.tri_list_index++];
 
 				/* copy the object information */
 				tri->z = object.z;
@@ -769,6 +824,7 @@ static void model2_3d_process_triangle( UINT32 attr )
 				tri->texheader[2] = object.texheader[2];
 				tri->texheader[3] = object.texheader[3];
 				tri->luma = object.luma;
+				tri->texlod = texlod;
 
 				/* set the viewport */
 				tri->viewport[0] = raster.viewport[0];
@@ -837,23 +893,188 @@ static void model2_3d_process_triangle( UINT32 attr )
 
 /***********************************************************************************************/
 
-INLINE UINT16 get_texel( UINT32 base_x, UINT32 base_y, int x, int y, UINT32 *sheet )
+INLINE uint16_t get_texel( uint32_t base_x, uint32_t base_y, int x, int y, uint32_t *sheet )
 {
-	UINT32	baseoffs = ((base_y/2)*512)+(base_x/2);
-	UINT32	texeloffs = ((y/2)*512)+(x/2);
-	UINT32	offset = baseoffs + texeloffs;
-	UINT32	texel = sheet[offset>>1];
+	uint32_t	offset;
+	uint32_t	texel;
+	int		x2 = (int)base_x + x;
+	int		y2 = (int)base_y + y;
+
+	/* The logical texture sheet is 2048x1024 (with mip0 occupying half of
+	 * it, since mips alternate halves of texture RAM); higher mip levels
+	 * compress base_x/base_y to the same window, but x/y come from the
+	 * polygon's interpolated UVs which can exceed the per-mip extent when
+	 * the texture is set to wrap.  Without masking, an oversized x+base_x
+	 * (up to a few thousand) walks past the wraparound case below and the
+	 * sheet[] indexing scribbles past the 2MB allocation - the point-
+	 * sampling renderer rarely tripped this, but bilinear hits the corner
+	 * cases four times per pixel and Daytona reliably crashes on it.
+	 * Mask both axes to the logical sheet extent first; with x2 in
+	 * [0,2047] and y2 in [0,1023] the wrap-and-XOR below produces a
+	 * physical (x2,y2) inside the 1024x2048 storage shape, and the final
+	 * sheet[offset>>1] is provably within the 0x80000-u32 allocation. */
+	x2 &= 2047;
+	y2 &= 1023;
+
+	/* Texture sheets are addressed as 2048x1024 but stored in RAM as
+	 * 1024x2048: when the X coordinate runs past 1024, wrap back to the
+	 * left and flip the Y address by 1024. */
+	if (x2 >= 1024)
+	{
+		x2 -= 1024;
+		y2 ^= 1024;
+	}
+
+	offset = ((uint32_t)(y2/2)*512) + (uint32_t)(x2/2);
+	texel = sheet[offset>>1];
 
 	if ( offset & 1 )
 		texel >>= 16;
 
-	if ( (y & 1) == 0 )
+	if ( (y2 & 1) == 0 )
 		texel >>= 8;
 
-	if ( (x & 1) == 0 )
+	if ( (x2 & 1) == 0 )
 		texel >>= 4;
 
 	return (texel & 0x0f);
+}
+
+/* count_leading_zeros_32: portable, returns 32 for v == 0.
+ * Used to compute the max mip level: max_level = 30 - clz(min(width, height)). */
+INLINE int model2_clz32( uint32_t v )
+{
+	int n = 0;
+	if (v == 0) return 32;
+	if ((v & 0xFFFF0000u) == 0) { n += 16; v <<= 16; }
+	if ((v & 0xFF000000u) == 0) { n +=  8; v <<=  8; }
+	if ((v & 0xF0000000u) == 0) { n +=  4; v <<=  4; }
+	if ((v & 0xC0000000u) == 0) { n +=  2; v <<=  2; }
+	if ((v & 0x80000000u) == 0) { n +=  1; }
+	return n;
+}
+
+/* fast_log2: returns log2 of a positive float as a 1.7 fixed-point value
+ * (the integer exponent in the high byte and a 7-bit fractional part
+ * looked up from the top 7 bits of the mantissa).  Used to derive the
+ * mip-level index from the perspective-corrected 1/z value. */
+INLINE int32_t model2_fast_log2( float value )
+{
+	static const uint8_t s_log2_table[128] =
+	{
+		  0,   2,   5,   8,  11,  14,  16,  19,  22,  25,  27,  30,  33,  35,  38,  40,
+		 43,  46,  48,  51,  53,  56,  58,  61,  63,  65,  68,  70,  73,  75,  77,  80,
+		 82,  84,  87,  89,  91,  93,  96,  98, 100, 102, 104, 106, 109, 111, 113, 115,
+		117, 119, 121, 123, 125, 127, 129, 132, 134, 136, 138, 140, 141, 143, 145, 147,
+		149, 151, 153, 155, 157, 159, 161, 162, 164, 166, 168, 170, 172, 173, 175, 177,
+		179, 181, 182, 184, 186, 188, 189, 191, 193, 194, 196, 198, 200, 201, 203, 205,
+		206, 208, 209, 211, 213, 214, 216, 218, 219, 221, 222, 224, 225, 227, 229, 230,
+		232, 233, 235, 236, 238, 239, 241, 242, 244, 245, 247, 248, 250, 251, 253, 254
+	};
+	uint32_t ival;
+	int32_t  exp;
+	if (value < 0.0f) return 0;
+	ival = f2u(value) >> 16;
+	exp = (int32_t)((ival >> 7) - 127);
+	return (exp << 8) | s_log2_table[ival & 127];
+}
+
+/* 2-tap linear interpolation, 8-bit fractional weight.  Operates in
+ * signed space so it works whether y is larger or smaller than x. */
+INLINE int32_t model2_lerp( int32_t x, int32_t y, uint32_t a )
+{
+	return x + (((y - x) * (int32_t)a) >> 8);
+}
+
+/* Fetch one bilinearly-filtered texel at mip level `level` (or the
+ * level-0 path when level == 0).  u/v are 24.8 fixed-point texture
+ * coordinates already perspective-corrected by the caller.  Result
+ * is an 8-bit smoothed texel in 0..240 (the four corner 4-bit texels
+ * are shifted left by 4 before interpolation), with bit 23 used to
+ * flag a transparent corner when translucent rendering is on. */
+INLINE uint32_t fetch_bilinear_texel(const poly_extra_data *extra,
+                                     int32_t level, int32_t u, int32_t v,
+                                     int translucent)
+{
+	uint32_t tex_width, tex_height;
+	uint32_t tex_x, tex_y;
+	uint32_t *sheet;
+	uint32_t ufrac, vfrac;
+	int      u0, u1, v0, v1;
+	uint32_t tex00, tex01, tex10, tex11;
+	int32_t  tex0x, tex1x;
+
+	/* per-mip texture window inside the sheet: at level 0 we start at the
+	 * polygon's (texx, texy); each mip step halves the dimensions and the
+	 * window origin steps by (2048>>level, 1024>>level) along the sheet.
+	 * Sheets alternate between the two halves with the level's LSB. */
+	tex_width  = extra->texwidth  >> level;
+	tex_height = extra->texheight >> level;
+	tex_x = ((extra->texx - 2048) >> level) & 2047;
+	tex_y = ((extra->texy - 1024) >> level) & 1023;
+	sheet = extra->texsheet[level & 1];
+	u >>= level;
+	v >>= level;
+
+	/* mirror across the texture extent if requested */
+	if (extra->texmirrorx && (u & ((int32_t)tex_width  << 8))) u = ~u;
+	if (extra->texmirrory && (v & ((int32_t)tex_height << 8))) v = ~v;
+
+	/* subtract half a texel to center the sample point on a corner */
+	u -= 0x80;
+	v -= 0x80;
+
+	ufrac = (uint32_t)u & 0xff;
+	vfrac = (uint32_t)v & 0xff;
+
+	u0 = (u >> 8) & ((int32_t)tex_width  - 1);
+	u1 = (u0 + 1) & ((int32_t)tex_width  - 1);
+	v0 = (v >> 8) & ((int32_t)tex_height - 1);
+	v1 = (v0 + 1) & ((int32_t)tex_height - 1);
+
+	/* if smooth wrapping is disabled, clamp at the edge instead of
+	 * letting the right/bottom blend into column/row 0 */
+	if (!extra->texwrapx && u1 == 0)
+	{
+		if (ufrac >= 0x80) { u0 = u1; u1 = (u1 + 1) & ((int32_t)tex_width  - 1); ufrac = 0; }
+		else               { u1 = u0; u0 = (u0 - 1 + (int32_t)tex_width)  & ((int32_t)tex_width  - 1); ufrac = 0x100; }
+	}
+	if (!extra->texwrapy && v1 == 0)
+	{
+		if (vfrac >= 0x80) { v0 = 0; v1 = 1; vfrac = 0; }
+		else               { v1 = v0; v0 = (v0 - 1 + (int32_t)tex_height) & ((int32_t)tex_height - 1); vfrac = 0x100; }
+	}
+
+	tex00 = (uint32_t)get_texel(tex_x, tex_y, u0, v0, sheet) << 4;
+	tex01 = (uint32_t)get_texel(tex_x, tex_y, u1, v0, sheet) << 4;
+	tex10 = (uint32_t)get_texel(tex_x, tex_y, u0, v1, sheet) << 4;
+	tex11 = (uint32_t)get_texel(tex_x, tex_y, u1, v1, sheet) << 4;
+
+	if (translucent)
+	{
+		/* tag opaque corners (texel != 0xf -> opaque); a transparent
+		 * corner adopts its horizontal neighbor's luma so the blend
+		 * doesn't pull a 0 value into the result. */
+		if (tex00 != 0xf0) tex00 |= 0x00800000u;
+		if (tex01 != 0xf0) tex01 |= 0x00800000u;
+		if (tex10 != 0xf0) tex10 |= 0x00800000u;
+		if (tex11 != 0xf0) tex11 |= 0x00800000u;
+		if (tex00 == 0x000000f0u) tex00 = tex01 & 0xff;
+		if (tex01 == 0x000000f0u) tex01 = tex00 & 0xff;
+		if (tex10 == 0x000000f0u) tex10 = tex11 & 0xff;
+		if (tex11 == 0x000000f0u) tex11 = tex10 & 0xff;
+	}
+
+	tex0x = model2_lerp((int32_t)tex00, (int32_t)tex01, ufrac);
+	tex1x = model2_lerp((int32_t)tex10, (int32_t)tex11, ufrac);
+
+	if (translucent)
+	{
+		if (tex0x == 0x000000f0) tex0x = tex1x & 0xff;
+		if (tex1x == 0x000000f0) tex1x = tex0x & 0xff;
+	}
+
+	return (uint32_t)model2_lerp(tex0x, tex1x, vfrac);
 }
 
 /* checker = 0, textured = 0, transparent = 0 */
@@ -929,7 +1150,7 @@ static const poly_draw_scanline_func render_funcs[8] =
 static void model2_3d_render( bitmap_t *bitmap, triangle *tri, const rectangle *cliprect )
 {
 	poly_extra_data *extra = (poly_extra_data *)poly_get_extra_data(poly);
-	UINT8		renderer;
+	uint8_t		renderer;
 	rectangle	vp;
 
 	/* select renderer based on attributes (bit15 = checker, bit14 = textured, bit13 = transparent */
@@ -946,18 +1167,38 @@ static void model2_3d_render( bitmap_t *bitmap, triangle *tri, const rectangle *
 	if ( vp.min_y < cliprect->min_y ) vp.min_y = cliprect->min_y;
 	if ( vp.max_y > cliprect->max_y ) vp.max_y = cliprect->max_y;
 
-	extra->lumabase = ((tri->texheader[1] & 0xFF) << 7) + ((tri->luma >> 5) ^ 0x7);
+	/* lumabase points at the per-texture luma table; the polygon's own
+	 * luma is kept separate and applied per-pixel as a multiplier below
+	 * in the textured renderer.  The previous formula baked an
+	 * ((luma >> 5) ^ 0x7) row offset into lumabase, which gave only 8
+	 * coarse shading levels per texture and re-used the same offset for
+	 * every texel; the multiplication approach gives continuous shading
+	 * scaled by the geometry engine's per-polygon luma. */
+	extra->lumabase = (tri->texheader[1] & 0xFF) << 7;
 	extra->colorbase = (tri->texheader[3] >> 6) & 0x3FF;
+	extra->luma = tri->luma;
 
 	if (renderer & 2)
 	{
 		extra->texwidth = 32 << ((tri->texheader[0] >> 0) & 0x7);
 		extra->texheight = 32 << ((tri->texheader[0] >> 3) & 0x7);
-		extra->texx = 32 * ((tri->texheader[2] >> 0) & 0x1f);
-		extra->texy = 32 * (((tri->texheader[2] >> 6) & 0x1f) + ( tri->texheader[2] & 0x20 ));
-		extra->texmirrorx = (tri->texheader[0] >> 9) & 1;
-		extra->texmirrory = (tri->texheader[0] >> 8) & 1;
-		extra->texsheet = (tri->texheader[2] & 0x1000) ? model2_textureram1 : model2_textureram0;
+		/* texx is 6 bits (tiles 0..63 across the 2048-wide sheet); bit 5
+		 * of texheader[2] belongs here, not in texy.  texy is just 5 bits
+		 * (tiles 0..31 down the 1024-tall sheet).  Mirror flags: bit 8 of
+		 * texheader[0] mirrors X, bit 9 mirrors Y. */
+		extra->texx = 32 * ((tri->texheader[2] >> 0) & 0x3f);
+		extra->texy = 32 * ((tri->texheader[2] >> 6) & 0x1f);
+		extra->texmirrorx = (tri->texheader[0] >> 8) & 1;
+		extra->texmirrory = (tri->texheader[0] >> 9) & 1;
+		/* smooth wrap flags are bits 6/7; disable smooth wrap when the
+		 * corresponding mirror flag is on (they're mutually exclusive) */
+		extra->texwrapx = ((tri->texheader[0] >> 6) & 1) & ~extra->texmirrorx;
+		extra->texwrapy = ((tri->texheader[0] >> 7) & 1) & ~extra->texmirrory;
+		/* mipmaps alternate between the two texture sheets; sheet[0] is
+		 * the level-0 source and sheet[1] is the level-1 source */
+		extra->texsheet[0] = (tri->texheader[2] & 0x1000) ? model2_textureram1 : model2_textureram0;
+		extra->texsheet[1] = (tri->texheader[2] & 0x1000) ? model2_textureram0 : model2_textureram1;
+		extra->texlod = tri->texlod;
 
 		tri->v[0].pz = 1.0f / (1.0f + tri->v[0].pz);
 		tri->v[0].pu = tri->v[0].pu * tri->v[0].pz * (1.0f / 8.0f);
@@ -997,7 +1238,7 @@ static void model2_3d_render( bitmap_t *bitmap, triangle *tri, const rectangle *
 /* 3D Rasterizer projection: projects a triangle into screen coordinates */
 static void model2_3d_project( triangle *tri )
 {
-	UINT16	i;
+	uint16_t	i;
 
 	for( i = 0; i < 3; i++ )
 	{
@@ -1023,7 +1264,7 @@ static void model2_3d_frame_start( void )
 
 static void model2_3d_frame_end( bitmap_t *bitmap, const rectangle *cliprect )
 {
-	INT32		z;
+	int32_t		z;
 
 	/* if we have nothing to render, bail */
 	if ( raster.tri_list_index == 0 )
@@ -1032,7 +1273,7 @@ static void model2_3d_frame_end( bitmap_t *bitmap, const rectangle *cliprect )
 #if DEBUG
 	if (input_code_pressed(machine, KEYCODE_Q))
 	{
-		UINT32	i;
+		uint32_t	i;
 
 		FILE *f = fopen( "triangles.txt", "w" );
 
@@ -1092,7 +1333,7 @@ static void model2_3d_frame_end( bitmap_t *bitmap, const rectangle *cliprect )
 }
 
 /* 3D Rasterizer main data input port */
-static void model2_3d_push( UINT32 input )
+static void model2_3d_push( uint32_t input )
 {
 	/* see if we have a command in progress */
 	if ( raster.cur_command != 0 )
@@ -1106,7 +1347,7 @@ static void model2_3d_push( UINT32 input )
 
 			case 0x01:	/* Polygon Data */
 			{
-				UINT32	attr;
+				uint32_t	attr;
 
 				/* start by looking if we have the basic input data */
 				if ( raster.command_index < 9 )
@@ -1152,7 +1393,7 @@ static void model2_3d_push( UINT32 input )
 
 			case 0x03:	/* Window Data */
 			{
-				UINT32	i;
+				uint32_t	i;
 
 				/* make sure we have all the data */
 				if ( raster.command_index < 6 )
@@ -1218,7 +1459,7 @@ static void model2_3d_push( UINT32 input )
 					if ( raster.command_index >= 3 )
 					{
 						/* get the address */
-						UINT32	address = raster.command_buffer[0];
+						uint32_t	address = raster.command_buffer[0];
 
 						/* do the write */
 						if ( address & 0x800000 )
@@ -1243,8 +1484,9 @@ static void model2_3d_push( UINT32 input )
 
 			case 0x08:	/* ZSort mode */
 			{
-				/* save the zsort mode value */
-				raster.z_adjust = u2f( raster.command_buffer[0] << 8 );
+				/* save the zsort mode value (raw bit pattern; only the
+				 * exponent byte is consumed by float_to_zval) */
+				raster.z_adjust = raster.command_buffer[0] << 8;
 
 				/* done with this command */
 				raster.cur_command = 0;
@@ -1291,10 +1533,10 @@ static void model2_3d_push( UINT32 input )
 
 typedef struct
 {
-	UINT32				mode;					/* bit 0 = Enable Specular, bit 1 = Calculate Normals */
-	UINT32 *			polygon_rom;			/* Polygon ROM pointer */
-	UINT32 *			polygon_ram0;			/* Fast Polygon RAM pointer */
-	UINT32 *			polygon_ram1;			/* Slow Polygon RAM pointer */
+	uint32_t				mode;					/* bit 0 = Enable Specular, bit 1 = Calculate Normals */
+	uint32_t *			polygon_rom;			/* Polygon ROM pointer */
+	uint32_t *			polygon_ram0;			/* Fast Polygon RAM pointer */
+	uint32_t *			polygon_ram1;			/* Slow Polygon RAM pointer */
 	float				matrix[12];				/* Current Transformation Matrix */
 	poly_vertex			focus;					/* Focus (x,y) */
 	poly_vertex			light;					/* Light Vector */
@@ -1311,13 +1553,13 @@ static geo_state geo;
  *
  *******************************************/
 
-static void geo_init( running_machine *machine, UINT32 *polygon_rom )
+static void geo_init( running_machine *machine, uint32_t *polygon_rom )
 {
 	memset( &geo, 0, sizeof( geo_state ) );
 
 	geo.polygon_rom = polygon_rom;
-	geo.polygon_ram0 = auto_alloc_array(machine, UINT32, 0x8000);
-	geo.polygon_ram1 = auto_alloc_array(machine, UINT32, 0x8000);
+	geo.polygon_ram0 = auto_alloc_array(machine, uint32_t, 0x8000);
+	geo.polygon_ram1 = auto_alloc_array(machine, uint32_t, 0x8000);
 }
 
 /*******************************************
@@ -1327,10 +1569,10 @@ static void geo_init( running_machine *machine, UINT32 *polygon_rom )
  *******************************************/
 
 /* Parse Polygons: Normals Present, No Specular case */
-static void geo_parse_np_ns( UINT32 *input, UINT32 count )
+static void geo_parse_np_ns( uint32_t *input, uint32_t count )
 {
 	poly_vertex	point, normal;
-	UINT32	attr, i;
+	uint32_t	attr, i;
 
 	/* read the 1st point */
 	point.x = u2f( *input++ );
@@ -1387,7 +1629,7 @@ static void geo_parse_np_ns( UINT32 *input, UINT32 count )
 		{
 			float				dotl, dotp, luminance, distance;
 			float				coef, face;
-			INT32				luma;
+			int32_t				luma;
 			texture_parameter *	texparam;
 
 			/* read in the next point */
@@ -1420,7 +1662,7 @@ static void geo_parse_np_ns( UINT32 *input, UINT32 count )
 			else luminance = fabs( dotl );
 
 			luminance = (luminance * texparam->diffuse) + texparam->ambient;
-			luma = (INT32)luminance;
+			luma = (int32_t)luminance;
 
 			if ( luma > 255 ) luma = 255;
 			if ( luma < 0 ) luma = 0;
@@ -1478,10 +1720,10 @@ static void geo_parse_np_ns( UINT32 *input, UINT32 count )
 }
 
 /* Parse Polygons: Normals Present, Specular case */
-static void geo_parse_np_s( UINT32 *input, UINT32 count )
+static void geo_parse_np_s( uint32_t *input, uint32_t count )
 {
 	poly_vertex	point, normal;
-	UINT32	attr, i;
+	uint32_t	attr, i;
 
 	/* read the 1st point */
 	point.x = u2f( *input++ );
@@ -1538,7 +1780,7 @@ static void geo_parse_np_s( UINT32 *input, UINT32 count )
 		{
 			float				dotl, dotp, luminance, distance, specular;
 			float				coef, face;
-			INT32				luma;
+			int32_t				luma;
 			texture_parameter *	texparam;
 
 			/* read in the next point */
@@ -1580,7 +1822,7 @@ static void geo_parse_np_s( UINT32 *input, UINT32 count )
 			specular *= texparam->specular_scale;
 
 			luminance = (luminance * texparam->diffuse) + texparam->ambient + specular;
-			luma = (INT32)luminance;
+			luma = (int32_t)luminance;
 
 			if ( luma > 255 ) luma = 255;
 			if ( luma < 0 ) luma = 0;
@@ -1638,10 +1880,10 @@ static void geo_parse_np_s( UINT32 *input, UINT32 count )
 }
 
 /* Parse Polygons: No Normals, No Specular case */
-static void geo_parse_nn_ns( UINT32 *input, UINT32 count )
+static void geo_parse_nn_ns( uint32_t *input, uint32_t count )
 {
 	poly_vertex	point, normal, p0, p1, p2, p3;
-	UINT32	attr, i;
+	uint32_t	attr, i;
 
 	/* read the 1st point */
 	point.x = u2f( *input++ );
@@ -1683,10 +1925,11 @@ static void geo_parse_nn_ns( UINT32 *input, UINT32 count )
 	model2_3d_push( f2u(point.y) >> 8 );
 	model2_3d_push( f2u(point.pz) >> 8 );
 
-	/* skip 4 */
-	input += 4;
-
-	/* loop through the following links */
+	/* loop through the following links.  Each polygon link has a
+	 * 3-word normal placeholder before its point data; we ignore the
+	 * stored normal and compute one from the cross product of the
+	 * already-seen vertices, but the placeholder still occupies the
+	 * stream and must be skipped per polygon. */
 	for( i = 0; i < count; i++ )
 	{
 		/* read in the attributes */
@@ -1699,8 +1942,12 @@ static void geo_parse_nn_ns( UINT32 *input, UINT32 count )
 		{
 			float				dotl, dotp, luminance, distance;
 			float				coef, face;
-			INT32				luma;
+			int32_t				luma;
 			texture_parameter *	texparam;
+
+			/* skip the per-polygon normal placeholder (3 words);
+			 * normals are computed locally below from the points */
+			input += 3;
 
 			/* read in the next point */
 			point.x = u2f( *input++ );
@@ -1741,7 +1988,7 @@ static void geo_parse_nn_ns( UINT32 *input, UINT32 count )
 			else luminance = fabs( dotl );
 
 			luminance = (luminance * texparam->diffuse) + texparam->ambient;
-			luma = (INT32)luminance;
+			luma = (int32_t)luminance;
 
 			if ( luma > 255 ) luma = 255;
 			if ( luma < 0 ) luma = 0;
@@ -1832,10 +2079,10 @@ static void geo_parse_nn_ns( UINT32 *input, UINT32 count )
 }
 
 /* Parse Polygons: No Normals, Specular case */
-static void geo_parse_nn_s( UINT32 *input, UINT32 count )
+static void geo_parse_nn_s( uint32_t *input, uint32_t count )
 {
 	poly_vertex	point, normal, p0, p1, p2, p3;
-	UINT32	attr, i;
+	uint32_t	attr, i;
 
 	/* read the 1st point */
 	point.x = u2f( *input++ );
@@ -1877,10 +2124,11 @@ static void geo_parse_nn_s( UINT32 *input, UINT32 count )
 	model2_3d_push( f2u(point.y) >> 8 );
 	model2_3d_push( f2u(point.pz) >> 8 );
 
-	/* skip 4 */
-	input += 4;
-
-	/* loop through the following links */
+	/* loop through the following links.  Each polygon link has a
+	 * 3-word normal placeholder before its point data; we ignore the
+	 * stored normal and compute one from the cross product of the
+	 * already-seen vertices, but the placeholder still occupies the
+	 * stream and must be skipped per polygon. */
 	for( i = 0; i < count; i++ )
 	{
 		/* read in the attributes */
@@ -1893,8 +2141,12 @@ static void geo_parse_nn_s( UINT32 *input, UINT32 count )
 		{
 			float				dotl, dotp, luminance, distance, specular;
 			float				coef, face;
-			INT32				luma;
+			int32_t				luma;
 			texture_parameter *	texparam;
+
+			/* skip the per-polygon normal placeholder (3 words);
+			 * normals are computed locally below from the points */
+			input += 3;
 
 			/* read in the next point */
 			point.x = u2f( *input++ );
@@ -1944,7 +2196,7 @@ static void geo_parse_nn_s( UINT32 *input, UINT32 count )
 			specular *= texparam->specular_scale;
 
 			luminance = (luminance * texparam->diffuse) + texparam->ambient + specular;
-			luma = (INT32)luminance;
+			luma = (int32_t)luminance;
 
 			if ( luma > 255 ) luma = 255;
 			if ( luma < 0 ) luma = 0;
@@ -2041,7 +2293,7 @@ static void geo_parse_nn_s( UINT32 *input, UINT32 count )
  *******************************************/
 
 /* Command 00: NOP */
-static UINT32 * geo_nop( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_nop( uint32_t opcode, uint32_t *input )
 {
 	/* push the opcode to the 3d rasterizer */
 	model2_3d_push( opcode >> 23 );
@@ -2050,14 +2302,14 @@ static UINT32 * geo_nop( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 01: Object Data */
-static UINT32 * geo_object_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_object_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	tpa = *input++;		/* Texture Point Address */
-	UINT32	tha = *input++;		/* Texture Header Address */
-	UINT32	oba = *input++;		/* Object Address */
-	UINT32	obc = *input++;		/* Object Count */
+	uint32_t	tpa = *input++;		/* Texture Point Address */
+	uint32_t	tha = *input++;		/* Texture Header Address */
+	uint32_t	oba = *input++;		/* Object Address */
+	uint32_t	obc = *input++;		/* Object Count */
 
-	UINT32 *obp;				/* Object Pointer */
+	uint32_t *obp;				/* Object Pointer */
 
 	/* push the initial set of data to the 3d rasterizer */
 	model2_3d_push( opcode >> 23 );
@@ -2101,11 +2353,11 @@ static UINT32 * geo_object_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 02: Direct Data */
-static UINT32 * geo_direct_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_direct_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	tpa = *input++;		/* Texture Point Address */
-	UINT32	tha = *input++;		/* Texture Header Address */
-	UINT32	attr;
+	uint32_t	tpa = *input++;		/* Texture Point Address */
+	uint32_t	tha = *input++;		/* Texture Header Address */
+	uint32_t	attr;
 
 	/* push the initial set of data to the 3d rasterizer */
 	model2_3d_push( (opcode >> 23) - 1 );
@@ -2159,9 +2411,9 @@ static UINT32 * geo_direct_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 03: Window Data */
-static UINT32 * geo_window_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_window_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	x, y, i;
+	uint32_t	x, y, i;
 
 	/* start by pushing the opcode */
 	model2_3d_push( opcode >> 23 );
@@ -2193,9 +2445,9 @@ static UINT32 * geo_window_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 04: Texture Data Write */
-static UINT32 * geo_texture_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_texture_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	i, count;
+	uint32_t	i, count;
 
 	/* start by pushing the opcode */
 	model2_3d_push( opcode >> 23 );
@@ -2217,30 +2469,57 @@ static UINT32 * geo_texture_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 05: Polygon Data */
-static UINT32 * geo_polygon_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_polygon_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	address, count, i;
-	UINT32 *p;
+	uint32_t	address, count, i, base, limit;
+	uint32_t *p;
 
 	(void)opcode;
 
 	/* read in the address */
 	address = *input++;
 
-	/* prepare the pointer */
+	/* prepare the pointer.  polygon_ram0 / polygon_ram1 are each
+	 * 0x8000 entries; the address is masked to the same 0x7fff window
+	 * regardless of which half is selected. */
+	base = address & 0x7FFF;
 	if ( address & 0x01000000 )
 	{
 		/* Fast polygon RAM */
-		p = &geo.polygon_ram0[address & 0x7FFF];
+		p = &geo.polygon_ram0[base];
 	}
 	else
 	{
 		/* Slow Polygon RAM */
-		p = &geo.polygon_ram1[address & 0x7FFF];
+		p = &geo.polygon_ram1[base];
 	}
 
 	/* read the count */
 	count = *input++;
+
+	/* Clamp the count to the remaining space in the destination RAM.
+	 * A desynced geometry stream can drop a multi-million-word value
+	 * here (the function is opcode 5, Polygon Data Write, and reads
+	 * the count blindly from the FIFO); without this guard the loop
+	 * walks straight past the end of the 0x8000-entry buffer into
+	 * unmapped memory and segfaults inside the per-frame render path.
+	 * Daytona reaches this with count ~ 1.5M into a 32K buffer.  When
+	 * we clamp we still advance the input pointer past the entire
+	 * declared block so subsequent opcodes see a sensible position. */
+	limit = 0x8000 - base;
+	if ( count > limit )
+	{
+		uint32_t skip;
+		logerror( "SEGA GEO: geo_polygon_data count %u exceeds %u-entry window at base %04x; clamping\n",
+				  count, limit, base );
+		/* copy what fits */
+		for ( i = 0; i < limit; i++ )
+			*p++ = *input++;
+		/* drop the rest on the floor but consume the stream so we stay aligned */
+		skip = count - limit;
+		input += skip;
+		return input;
+	}
 
 	/* move the data */
 	for( i = 0; i < count; i++ )
@@ -2250,9 +2529,9 @@ static UINT32 * geo_polygon_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 06: Texture Parameters */
-static UINT32 * geo_texture_parameters( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_texture_parameters( uint32_t opcode, uint32_t *input )
 {
-	UINT32	index, count, i, param;
+	uint32_t	index, count, i, param;
 
 	(void)opcode;
 
@@ -2282,7 +2561,7 @@ static UINT32 * geo_texture_parameters( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 07: Geo Mode */
-static UINT32 * geo_mode( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_mode( uint32_t opcode, uint32_t *input )
 {
 	(void)opcode;
 
@@ -2293,7 +2572,7 @@ static UINT32 * geo_mode( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 08: ZSort Mode */
-static UINT32 * geo_zsort_mode( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_zsort_mode( uint32_t opcode, uint32_t *input )
 {
 	/* push the opcode */
 	model2_3d_push( opcode >> 23 );
@@ -2305,7 +2584,7 @@ static UINT32 * geo_zsort_mode( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 09: Focal Distance */
-static UINT32 * geo_focal_distance( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_focal_distance( uint32_t opcode, uint32_t *input )
 {
 	(void)opcode;
 
@@ -2319,7 +2598,7 @@ static UINT32 * geo_focal_distance( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0A: Light Source Vector Write */
-static UINT32 * geo_light_source( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_light_source( uint32_t opcode, uint32_t *input )
 {
 	(void)opcode;
 
@@ -2336,9 +2615,9 @@ static UINT32 * geo_light_source( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0B: Transformation Matrix Write */
-static UINT32 * geo_matrix_write( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_matrix_write( uint32_t opcode, uint32_t *input )
 {
-	UINT32	i;
+	uint32_t	i;
 
 	(void)opcode;
 
@@ -2350,9 +2629,9 @@ static UINT32 * geo_matrix_write( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0C: Parallel Transfer Vector Write */
-static UINT32 * geo_translate_write( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_translate_write( uint32_t opcode, uint32_t *input )
 {
-	UINT32	i;
+	uint32_t	i;
 
 	(void)opcode;
 
@@ -2364,9 +2643,9 @@ static UINT32 * geo_translate_write( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0D: Geo Data Memory Push (undocumented, unsupported) */
-static UINT32 * geo_data_mem_push( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_data_mem_push( uint32_t opcode, uint32_t *input )
 {
-	UINT32	address, count, i;
+	uint32_t	address, count, i;
 
 	/*
         This command pushes data stored in the Geometry DSP's RAM
@@ -2401,9 +2680,9 @@ static UINT32 * geo_data_mem_push( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0E: Geo Test */
-static UINT32 * geo_test( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_test( uint32_t opcode, uint32_t *input )
 {
-	UINT32		data, blocks, address, count, checksum, i;
+	uint32_t		data, blocks, address, count, checksum, i;
 
 	(void)opcode;
 
@@ -2426,7 +2705,7 @@ static UINT32 * geo_test( UINT32 opcode, UINT32 *input )
 
 	for( i = 0; i < blocks; i++ )
 	{
-		UINT32	sum_even, sum_odd, j;
+		uint32_t	sum_even, sum_odd, j;
 
 		/* read in the address */
 		address = (*input++) & 0x7FFFFF;
@@ -2471,7 +2750,7 @@ static UINT32 * geo_test( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 0F: End */
-static UINT32 * geo_end( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_end( uint32_t opcode, uint32_t *input )
 {
 	(void)opcode;
 
@@ -2483,9 +2762,9 @@ static UINT32 * geo_end( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 10: Dummy */
-static UINT32 * geo_dummy( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_dummy( uint32_t opcode, uint32_t *input )
 {
-	UINT32	data;
+	uint32_t	data;
 	(void)opcode;
 
 	/* do the dummy read cycle */
@@ -2495,9 +2774,9 @@ static UINT32 * geo_dummy( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 14: Log Data Write */
-static UINT32 * geo_log_data( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_log_data( uint32_t opcode, uint32_t *input )
 {
-	UINT32	i, count;
+	uint32_t	i, count;
 
 	/* start by pushing the opcode */
 	model2_3d_push( opcode >> 23 );
@@ -2514,7 +2793,7 @@ static UINT32 * geo_log_data( UINT32 opcode, UINT32 *input )
 	/* loop and send the data */
 	for( i = 0; i < count; i++ )
 	{
-		UINT32	data = *input++;
+		uint32_t	data = *input++;
 
 		model2_3d_push( data & 0xff );
 		model2_3d_push( (data >> 8) & 0xff );
@@ -2526,7 +2805,7 @@ static UINT32 * geo_log_data( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 16: LOD */
-static UINT32 * geo_lod( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_lod( uint32_t opcode, uint32_t *input )
 {
 	(void)opcode;
 
@@ -2537,9 +2816,9 @@ static UINT32 * geo_lod( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 1D: Code Upload  (undocumented, unsupported) */
-static UINT32 * geo_code_upload( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_code_upload( uint32_t opcode, uint32_t *input )
 {
-	UINT32	flags, count, i;
+	uint32_t	flags, count, i;
 
 	/*
         This command uploads code to program memory and
@@ -2560,7 +2839,7 @@ static UINT32 * geo_code_upload( UINT32 opcode, UINT32 *input )
 
 	for( i = 0; i < count; i++ )
 	{
-		UINT64	code;
+		uint64_t	code;
 
 		/* read the top part of the opcode */
 		code = *input++;
@@ -2585,9 +2864,9 @@ static UINT32 * geo_code_upload( UINT32 opcode, UINT32 *input )
 }
 
 /* Command 1E: Code Jump (undocumented, unsupported) */
-static UINT32 * geo_code_jump( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_code_jump( uint32_t opcode, uint32_t *input )
 {
-	UINT32	address;
+	uint32_t	address;
 
 	/*
         This command jumps to a specified address in program
@@ -2609,9 +2888,15 @@ static UINT32 * geo_code_jump( UINT32 opcode, UINT32 *input )
 	return input;
 }
 
-static UINT32 * geo_process_command( UINT32 opcode, UINT32 *input )
+static uint32_t * geo_process_command( uint32_t opcode, uint32_t *input )
 {
-	switch( opcode >> 23 )
+	/* The command field is 5 bits.  Without the mask, any bits above bit
+	 * 27 push the switch value out of range 0..0x1f, the case falls
+	 * through unmatched, the command's argument words are NOT consumed,
+	 * and the loop then re-interprets those arg words as fresh opcodes.
+	 * Result: complete parse corruption for any opcode that uses the
+	 * upper bits (e.g. as a block id / tag). */
+	switch( (opcode >> 23) & 0x1f )
 	{
 		case 0x00: input = geo_nop( opcode, input );				break;
 		case 0x01: input = geo_object_data( opcode, input );		break;
@@ -2652,11 +2937,29 @@ static UINT32 * geo_process_command( UINT32 opcode, UINT32 *input )
 
 static void geo_parse( void )
 {
-	UINT32	address = (geo_read_start_address/4);
-	UINT32 *input = &model2_bufferram[address];
-	UINT32	opcode;
+	/* mask the start address to the 17-bit buffer extent (0x1FFFF
+	 * bytes / 0x7FFF dwords).  geo_read_start_address gets through to
+	 * here with up to 20 bits set from its writer mask, which after /4
+	 * indexes 0x3FFFF dwords - twice the size of the bufferram
+	 * allocation.  Anything starting past 0x20000 dwords would have
+	 * failed the while-loop bound on the very first check and silently
+	 * skipped the entire frame's command stream; masking keeps the
+	 * start inside the buffer the same way the wider hardware does. */
+	uint32_t	address = (geo_read_start_address & 0x1FFFF) / 4;
+	uint32_t *input = &model2_bufferram[address];
+	uint32_t	opcode;
+	uint32_t	op_count = 0;
 
-	while( input != NULL && (input - model2_bufferram) < 0x20000  )
+	/* Backstop against a runaway command stream (a corrupted jump
+	 * target that loops back into itself, or a frame where the desync
+	 * paths in the per-poly parsers leave the input pointer never
+	 * approaching the buffer end).  0x8000 ops is roughly the maximum
+	 * a sane frame ever issues; past that we are clearly off the
+	 * rails and continuing only risks segfaulting in a downstream
+	 * command handler that trusts a length word it read from garbage. */
+	while( input != NULL
+		&& (input - model2_bufferram) < 0x20000
+		&& op_count++ < 0x8000 )
 	{
 		/* read in the opcode */
 		opcode = *input++;
@@ -2664,8 +2967,12 @@ static void geo_parse( void )
 		/* if it's a jump opcode, do the jump */
 		if ( opcode & 0x80000000 )
 		{
-			/* get the address */
-			address = (opcode & 0x7FFFF) / 4;
+			/* get the address.  The buffer is 0x20000 dwords (17 bits);
+			 * the wider 0x7FFFF mask let through jump targets past the
+			 * end of the buffer, where the (input - bufferram) < 0x20000
+			 * bounds check then cut off parsing prematurely.  Mask to
+			 * 0x1FFFF so jump addresses always wrap into the buffer. */
+			address = (opcode & 0x1FFFF) / 4;
 
 			/* update our pointer */
 			input = &model2_bufferram[address];
@@ -2701,10 +3008,13 @@ VIDEO_START(model2)
 	machine->add_notifier(MACHINE_NOTIFY_EXIT, model2_exit);
 
 	/* initialize the geometry engine */
-	geo_init( machine, (UINT32*)memory_region(machine, "user2") );
+	geo_init( machine, (uint32_t*)memory_region(machine, "user2") );
 
 	/* initialize the hardware rasterizer */
-	model2_3d_init( machine, (UINT16*)memory_region(machine, "user3") );
+	model2_3d_init( machine, (uint16_t*)memory_region(machine, "user3") );
+
+	/* build the contrast/black-level translation table */
+	model2_build_gamma_table();
 }
 
 static void convert_bitmap( running_machine *machine, bitmap_t *dst, bitmap_t *src, const rectangle *rect )
@@ -2713,8 +3023,8 @@ static void convert_bitmap( running_machine *machine, bitmap_t *dst, bitmap_t *s
 
 	for( y = rect->min_y; y < rect->max_y; y++ )
 	{
-		UINT32 *d = BITMAP_ADDR32( dst, y, 0 );
-		UINT16 *s = BITMAP_ADDR16( src, y, 0 );
+		uint32_t *d = BITMAP_ADDR32( dst, y, 0 );
+		uint16_t *s = BITMAP_ADDR16( src, y, 0 );
 
 		for( x = rect->min_x; x < rect->max_x; x++ )
 		{

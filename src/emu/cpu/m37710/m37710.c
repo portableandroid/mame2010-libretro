@@ -395,7 +395,7 @@ static void m37710_recalc_timer(m37710i_cpu_struct *cpustate, int timer)
 	}
 }
 
-static UINT8 m37710_internal_r(m37710i_cpu_struct *cpustate, int offset)
+static uint8_t m37710_internal_r(m37710i_cpu_struct *cpustate, int offset)
 {
 	#if M37710_DEBUG
 	if (offset > 1)
@@ -465,7 +465,7 @@ static UINT8 m37710_internal_r(m37710i_cpu_struct *cpustate, int offset)
 	return cpustate->m37710_regs[offset];
 }
 
-static void m37710_internal_w(m37710i_cpu_struct *cpustate, int offset, UINT8 data)
+static void m37710_internal_w(m37710i_cpu_struct *cpustate, int offset, uint8_t data)
 {
 	int i;
 
@@ -893,7 +893,7 @@ static CPU_INIT( m37710 )
 	m37710i_cpu_struct *cpustate = get_safe_token(device);
 	int i;
 
-	memset(cpustate, 0, sizeof(cpustate));
+	memset(cpustate, 0, sizeof(*cpustate));
 
 	INT_ACK = irqcallback;
 	cpustate->device = device;

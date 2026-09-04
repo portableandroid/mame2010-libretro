@@ -4,6 +4,7 @@ DEPS_DIR          = $(SRC_DIR)/lib
 
 INCFLAGS := \
 	-I$(LIBRETRO_COMM_DIR)/include \
+	-I$(LIBRETRO_COMM_DIR)/include/compat/zlib \
 	-I$(SRC_DIR)/$(TARGET) \
 	-I$(OBJ)/$(TARGET)/layout \
 	-I$(SRC_DIR)/emu \
@@ -575,7 +576,7 @@ CAPCOM_OBJS := \
 	$(DRIVERS)/blktiger.o $(VIDEO)/blktiger.o \
 	$(DRIVERS)/cbasebal.o $(VIDEO)/cbasebal.o \
 	$(DRIVERS)/commando.o $(VIDEO)/commando.o \
-	$(DRIVERS)/cps1.o $(VIDEO)/cps1.o \
+	$(DRIVERS)/cps1.o $(VIDEO)/cps1.o $(VIDEO)/cps_tilemap.o \
 	$(DRIVERS)/cps2.o \
 	$(DRIVERS)/cps3.o $(AUDIO)/cps3.o \
 	$(DRIVERS)/egghunt.o \
@@ -2045,7 +2046,6 @@ EMUSOUNDOBJS = \
 	$(EMUOBJ)/sound/filter.o \
 	$(EMUOBJ)/sound/flt_vol.o \
 	$(EMUOBJ)/sound/flt_rc.o \
-	$(EMUOBJ)/sound/wavwrite.o \
 
 EMUAUDIOOBJS = \
 	$(EMUAUDIO)/generic.o \
@@ -4619,13 +4619,11 @@ LIBZ_OBJS = \
 	$(LIBOBJ)/zlib/compress.o \
 	$(LIBOBJ)/zlib/crc32.o \
 	$(LIBOBJ)/zlib/deflate.o \
-	$(LIBOBJ)/zlib/gzio.o \
 	$(LIBOBJ)/zlib/inffast.o \
 	$(LIBOBJ)/zlib/inflate.o \
 	$(LIBOBJ)/zlib/infback.o \
 	$(LIBOBJ)/zlib/inftrees.o \
 	$(LIBOBJ)/zlib/trees.o \
-	$(LIBOBJ)/zlib/uncompr.o \
 	$(LIBOBJ)/zlib/zutil.o
 
 $(OBJ)/libz.a: $(LIBZ_OBJS)
@@ -4699,10 +4697,6 @@ $(LIBOBJ)/softfloat/softfloat.o: $(LIBSRC)/softfloat/softfloat.c \
 
 MINISRC = $(SRC_DIR)/osd/$(OSD)
 MINIOBJ = $(OBJ)/osd/$(OSD)
-ifeq ($(VRENDER),opengl)
-GLOBJ = $(OBJ)/osd/$(OSD)/glsym
-OBJDIRS += $(GLOBJ)
-endif
 OBJDIRS += $(MINIOBJ)
 
 ifneq ($(STATIC_LINKING), 1)
@@ -4740,14 +4734,6 @@ endif
 #-------------------------------------------------
 # OSD mini library
 #-------------------------------------------------
-ifeq ($(VRENDER),opengl)
-OSDOBJS += $(MINIOBJ)/libretro-common/glsym/rglgen.o
-ifeq ($(GLES), 1)
-OSDOBJS += $(MINIOBJ)/libretro-common/glsym/glsym_es2.o
-else
-OSDOBJS += $(MINIOBJ)/libretro-common/glsym/glsym_gl.o
-endif
-endif
 OSDOBJS += $(OBJ)/osd/retro/retromain.o 
 
 LIBOSD_OBJS := $(OSDOBJS)

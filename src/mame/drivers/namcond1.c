@@ -124,13 +124,13 @@ INPUT_PORTS_END
 
 /* text-layer characters */
 
-static const UINT32 pts_4bits_layout_xoffset[64] =
+static const uint32_t pts_4bits_layout_xoffset[64] =
 {
 	STEP8( 0*256, 4 ), STEP8( 1*256, 4 ), STEP8( 4*256, 4 ), STEP8( 5*256, 4 ),
 	STEP8( 16*256, 4 ), STEP8( 17*256, 4 ), STEP8( 20*256, 4 ), STEP8( 21*256, 4 )
 };
 
-static const UINT32 pts_4bits_layout_yoffset[64] =
+static const uint32_t pts_4bits_layout_yoffset[64] =
 {
 	STEP8( 0*256, 8*4 ), STEP8( 2*256, 8*4 ), STEP8( 8*256, 8*4 ), STEP8( 10*256, 8*4 ),
 	STEP8( 32*256, 8*4 ), STEP8( 34*256, 8*4 ), STEP8( 40*256, 8*4 ), STEP8( 42*256, 8*4 )
@@ -281,6 +281,11 @@ static INTERRUPT_GEN( mcu_interrupt )
   - The level 1 interrupt to the 68k has been measured at 60Hz.
 *******************************************/
 
+static const c352_interface namcond1_c352_interface =
+{
+	288	/* spec-correct C352 voice-cycle divider */
+};
+
 static MACHINE_DRIVER_START( namcond1 )
 
 	/* basic machine hardware */
@@ -322,7 +327,11 @@ static MACHINE_DRIVER_START( namcond1 )
 	/* sound hardware */
 	MDRV_SPEAKER_STANDARD_STEREO("lspeaker", "rspeaker")
 
-	MDRV_SOUND_ADD("c352", C352, 16384000)
+	/* C352 fed 24.576 MHz (= 49.152/2) per the PCB doc above; /288 is the
+	 * chip's per-voice processing cycle. Effective output rate
+	 * 24576000 / 288 = 85333 Hz, identical to the legacy 16384000 / 192. */
+	MDRV_SOUND_ADD("c352", C352, 24576000)
+	MDRV_SOUND_CONFIG(namcond1_c352_interface)
 	MDRV_SOUND_ROUTE(0, "rspeaker", 1.00)
 	MDRV_SOUND_ROUTE(1, "lspeaker", 1.00)
 	MDRV_SOUND_ROUTE(2, "rspeaker", 1.00)

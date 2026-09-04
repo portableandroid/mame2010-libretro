@@ -29,7 +29,6 @@
 
 #include "emu.h"
 #include "streams.h"
-#include "wavwrite.h"
 #include "sn76477.h"
 
 
@@ -41,29 +40,6 @@
  *****************************************************************************/
 
 #define VERBOSE					1
-
-/* if 1, create a .wav file of the sound produced */
-#define LOG_WAV					0
-
-/* if 1 and LOG_WAV is 1, only logs to .wav file in chip is enabled */
-#define LOG_WAV_ENABLED_ONLY	0
-
-/* determines what value will be logged in the left channel of the .wav file */
-#define LOG_WAV_VALUE_L			0	/* 0 = OUT voltage */
-									/* 1 = enable line */
-									/* 2 = one-shot cap voltage */
-									/* 3 = a/d cap voltage */
-									/* 4 = slf cap voltage */
-									/* 5 = vco cap voltage */
-									/* 6 = noise filter cap voltage */
-
-/* determines what value will be logged in the right channel of the .wav file
-   same values as for the left channel above */
-#define LOG_WAV_VALUE_R			3
-
-#define LOG_WAV_GAIN_FACTOR		1000
-
-#define LOG_WAV_FILE_NAME		"sn76477_%s.wav"
 
 
 #define LOG(n,x) do { if (VERBOSE >= (n)) logerror x; } while (0)
@@ -198,35 +174,35 @@ typedef struct _sn76477_state sn76477_state;
 struct _sn76477_state
 {
 	/* chip's external interface */
-	UINT32 enable;
-	UINT32 envelope_mode;
-	UINT32 vco_mode;
-	UINT32 mixer_mode;
+	uint32_t enable;
+	uint32_t envelope_mode;
+	uint32_t vco_mode;
+	uint32_t mixer_mode;
 
 	double one_shot_res;
 	double one_shot_cap;
-	UINT32 one_shot_cap_voltage_ext;
+	uint32_t one_shot_cap_voltage_ext;
 
 	double slf_res;
 	double slf_cap;
-	UINT32 slf_cap_voltage_ext;
+	uint32_t slf_cap_voltage_ext;
 
 	double vco_voltage;
 	double vco_res;
 	double vco_cap;
-	UINT32 vco_cap_voltage_ext;
+	uint32_t vco_cap_voltage_ext;
 
 	double noise_clock_res;
-	UINT32 noise_clock_ext;
-	UINT32 noise_clock;
+	uint32_t noise_clock_ext;
+	uint32_t noise_clock;
 	double noise_filter_res;
 	double noise_filter_cap;
-	UINT32 noise_filter_cap_voltage_ext;
+	uint32_t noise_filter_cap_voltage_ext;
 
 	double attack_res;
 	double decay_res;
 	double attack_decay_cap;
-	UINT32 attack_decay_cap_voltage_ext;
+	uint32_t attack_decay_cap_voltage_ext;
 
 	double amplitude_res;
 	double feedback_res;
@@ -234,30 +210,28 @@ struct _sn76477_state
 
 	/* chip's internal state */
 	double one_shot_cap_voltage;		/* voltage on the one-shot cap */
-	UINT32 one_shot_running_ff;			/* 1 = one-shot running, 0 = stopped */
+	uint32_t one_shot_running_ff;			/* 1 = one-shot running, 0 = stopped */
 
 	double slf_cap_voltage;				/* voltage on the SLF cap */
-	UINT32 slf_out_ff;					/* output of the SLF */
+	uint32_t slf_out_ff;					/* output of the SLF */
 
 	double vco_cap_voltage;				/* voltage on the VCO cap */
-	UINT32 vco_out_ff;					/* output of the VCO */
-	UINT32 vco_alt_pos_edge_ff;			/* keeps track of the # of positive edges for VCO Alt envelope */
+	uint32_t vco_out_ff;					/* output of the VCO */
+	uint32_t vco_alt_pos_edge_ff;			/* keeps track of the # of positive edges for VCO Alt envelope */
 
 	double noise_filter_cap_voltage;	/* voltage on the noise filter cap */
-	UINT32 real_noise_bit_ff;			/* the current noise bit before filtering */
-	UINT32 filtered_noise_bit_ff;		/* the noise bit after filtering */
-	UINT32 noise_gen_count;				/* noise freq emulation */
+	uint32_t real_noise_bit_ff;			/* the current noise bit before filtering */
+	uint32_t filtered_noise_bit_ff;		/* the noise bit after filtering */
+	uint32_t noise_gen_count;				/* noise freq emulation */
 
 	double attack_decay_cap_voltage;	/* voltage on the attack/decay cap */
 
-	UINT32 rng;							/* current value of the random number generator */
+	uint32_t rng;							/* current value of the random number generator */
 
 	/* others */
 	sound_stream *channel;				/* returned by stream_create() */
 	int sample_rate;					/* from machine->sample_rate */
 	running_device *device;
-
-	wav_file *file;						/* handle of the wave file to produce */
 };
 
 
@@ -439,7 +413,7 @@ static double compute_vco_duty_cycle(sn76477_state *sn) /* no measure, just a nu
 }
 
 
-static UINT32 compute_noise_gen_freq(sn76477_state *sn) /* in Hz */
+static uint32_t compute_noise_gen_freq(sn76477_state *sn) /* in Hz */
 {
 	/* this formula was derived using the data points below
 
@@ -469,7 +443,7 @@ static UINT32 compute_noise_gen_freq(sn76477_state *sn) /* in Hz */
         3.3M          487.59
     */
 
-	UINT32 ret = 0;
+	uint32_t ret = 0;
 
 	if ((sn->noise_clock_res >= NOISE_MIN_CLOCK_RES) &&
 	    (sn->noise_clock_res <= NOISE_MAX_CLOCK_RES))
@@ -907,37 +881,6 @@ static void log_complete_state(sn76477_state *sn)
 
 /*****************************************************************************
  *
- *  .WAV file functions
- *
- *****************************************************************************/
-
-
-static void open_wav_file(sn76477_state *sn)
-{
-	char wav_file_name[30];
-
-	sprintf(wav_file_name, LOG_WAV_FILE_NAME, sn->device->tag());
-	sn->file = wav_open(wav_file_name, sn->sample_rate, 2);
-
-	LOG(1, ("SN76477 '%s':         Logging output: %s\n", sn->device->tag(), wav_file_name));
-}
-
-
-static void close_wav_file(sn76477_state *sn)
-{
-	wav_close(sn->file);
-}
-
-
-static void add_wav_data(sn76477_state *sn, INT16 data_l, INT16 data_r)
-{
-	wav_add_data_16lr(sn->file, &data_l, &data_r, 1);
-}
-
-
-
-/*****************************************************************************
- *
  *  Noise generator
  *
  *****************************************************************************/
@@ -948,9 +891,9 @@ static void intialize_noise(sn76477_state *sn)
 }
 
 
-INLINE UINT32 generate_next_real_noise_bit(sn76477_state *sn)
+INLINE uint32_t generate_next_real_noise_bit(sn76477_state *sn)
 {
-	UINT32 out = ((sn->rng >> 28) & 1) ^ ((sn->rng >> 0) & 1);
+	uint32_t out = ((sn->rng >> 28) & 1) ^ ((sn->rng >> 0) & 1);
 
 	 /* if bits 0-4 and 28 are all zero then force the output to 1 */
 	if ((sn->rng & 0x1000001f) == 0)
@@ -971,7 +914,7 @@ INLINE UINT32 generate_next_real_noise_bit(sn76477_state *sn)
  *
  *****************************************************************************/
 
-static void _SN76477_enable_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_enable_w(sn76477_state *sn, uint32_t data)
 {
 	sn->enable = data;
 
@@ -987,7 +930,7 @@ static void _SN76477_enable_w(sn76477_state *sn, UINT32 data)
 }
 
 
-static void SN76477_test_enable_w(sn76477_state *sn, UINT32 data)
+static void SN76477_test_enable_w(sn76477_state *sn, uint32_t data)
 {
 	if (data != sn->enable)
 	{
@@ -1000,7 +943,7 @@ static void SN76477_test_enable_w(sn76477_state *sn, UINT32 data)
 }
 
 
-void sn76477_enable_w(running_device *device, UINT32 data)
+void sn76477_enable_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1019,13 +962,13 @@ void sn76477_enable_w(running_device *device, UINT32 data)
  *
  *****************************************************************************/
 
-static void _SN76477_mixer_a_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_mixer_a_w(sn76477_state *sn, uint32_t data)
 {
 	sn->mixer_mode = (sn->mixer_mode & ~0x01) | (data << 0);
 }
 
 
-void sn76477_mixer_a_w(running_device *device, UINT32 data)
+void sn76477_mixer_a_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1044,13 +987,13 @@ void sn76477_mixer_a_w(running_device *device, UINT32 data)
 }
 
 
-static void _SN76477_mixer_b_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_mixer_b_w(sn76477_state *sn, uint32_t data)
 {
 	sn->mixer_mode = (sn->mixer_mode & ~0x02) | (data << 1);
 }
 
 
-void sn76477_mixer_b_w(running_device *device, UINT32 data)
+void sn76477_mixer_b_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1069,13 +1012,13 @@ void sn76477_mixer_b_w(running_device *device, UINT32 data)
 }
 
 
-static void _SN76477_mixer_c_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_mixer_c_w(sn76477_state *sn, uint32_t data)
 {
 	sn->mixer_mode = (sn->mixer_mode & ~0x04) | (data << 2);
 }
 
 
-void sn76477_mixer_c_w(running_device *device, UINT32 data)
+void sn76477_mixer_c_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1101,13 +1044,13 @@ void sn76477_mixer_c_w(running_device *device, UINT32 data)
  *
  *****************************************************************************/
 
-static void _SN76477_envelope_1_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_envelope_1_w(sn76477_state *sn, uint32_t data)
 {
 	sn->envelope_mode = (sn->envelope_mode & ~0x01) | (data << 0);
 }
 
 
-void sn76477_envelope_1_w(running_device *device, UINT32 data)
+void sn76477_envelope_1_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1126,13 +1069,13 @@ void sn76477_envelope_1_w(running_device *device, UINT32 data)
 }
 
 
-static void _SN76477_envelope_2_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_envelope_2_w(sn76477_state *sn, uint32_t data)
 {
 	sn->envelope_mode = (sn->envelope_mode & ~0x02) | (data << 1);
 }
 
 
-void sn76477_envelope_2_w(running_device *device, UINT32 data)
+void sn76477_envelope_2_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1158,13 +1101,13 @@ void sn76477_envelope_2_w(running_device *device, UINT32 data)
  *
  *****************************************************************************/
 
-static void _SN76477_vco_w(sn76477_state *sn, UINT32 data)
+static void _SN76477_vco_w(sn76477_state *sn, uint32_t data)
 {
 	sn->vco_mode = data;
 }
 
 
-void sn76477_vco_w(running_device *device, UINT32 data)
+void sn76477_vco_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1579,7 +1522,7 @@ void sn76477_pitch_voltage_w(running_device *device, double data)
  *
  *****************************************************************************/
 
-void sn76477_noise_clock_w(running_device *device, UINT32 data)
+void sn76477_noise_clock_w(running_device *device, uint32_t data)
 {
 #if TEST_MODE == 0
 	sn76477_state *sn = get_safe_token(device);
@@ -1975,7 +1918,7 @@ static STREAM_UPDATE( SN76477_update )
 	double vco_cap_charging_step;
 	double vco_cap_discharging_step;
 	double vco_cap_voltage_max;
-	UINT32 noise_gen_freq;
+	uint32_t noise_gen_freq;
 	double noise_filter_cap_charging_step;
 	double noise_filter_cap_discharging_step;
 	double attack_decay_cap_charging_step;
@@ -2209,7 +2152,7 @@ static STREAM_UPDATE( SN76477_update )
 		/* mix the output, if enabled, or not saturated by the VCO */
 		if (!sn->enable && (sn->vco_cap_voltage <= VCO_CAP_VOLTAGE_MAX))
 		{
-			UINT32 out;
+			uint32_t out;
 
 			/* enabled */
 			switch (sn->mixer_mode)
@@ -2277,46 +2220,6 @@ static STREAM_UPDATE( SN76477_update )
                       \ Vcen - Vmin    /
          */
 		*buffer++ = (((voltage_out - OUT_LOW_CLIP_THRESHOLD) / (OUT_CENTER_LEVEL_VOLTAGE - OUT_LOW_CLIP_THRESHOLD)) - 1) * 32767;
-
-		if (LOG_WAV && LOG_WAV_ENABLED_ONLY && !sn->enable)
-		{
-			INT16 log_data_l;
-			INT16 log_data_r;
-
-			switch (LOG_WAV_VALUE_L)
-			{
-			case 0:
-				log_data_l = LOG_WAV_GAIN_FACTOR * voltage_out;
-				log_data_r = LOG_WAV_GAIN_FACTOR * voltage_out;
-				break;
-			case 1:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->enable;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->enable;
-				break;
-			case 2:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->one_shot_cap_voltage;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->one_shot_cap_voltage;
-				break;
-			case 3:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->attack_decay_cap_voltage;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->attack_decay_cap_voltage;
-				break;
-			case 4:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->slf_cap_voltage;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->slf_cap_voltage;
-				break;
-			case 5:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->vco_cap_voltage;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->vco_cap_voltage;
-				break;
-			case 6:
-				log_data_l = LOG_WAV_GAIN_FACTOR * sn->noise_filter_cap_voltage;
-				log_data_r = LOG_WAV_GAIN_FACTOR * sn->noise_filter_cap_voltage;
-				break;
-			}
-
-			add_wav_data(sn, log_data_l, log_data_r);
-		}
 	}
 }
 
@@ -2454,18 +2357,11 @@ static DEVICE_START( sn76477 )
 	state_save_register(device, sn);
 
 	log_complete_state(sn);
-
-	if (LOG_WAV)
-		open_wav_file(sn);
 }
 
 
 static DEVICE_STOP( sn76477 )
 {
-	sn76477_state *sn = get_safe_token(device);
-
-	if (LOG_WAV)
-		close_wav_file(sn);
 }
 
 

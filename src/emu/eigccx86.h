@@ -83,17 +83,17 @@ _mulu_32x32(UINT32 a, UINT32 b)
 
 #ifndef __x86_64__
 #define mul_32x32 _mul_32x32
-INLINE INT64 ATTR_CONST ATTR_FORCE_INLINE
-_mul_32x32(INT32 a, INT32 b)
+INLINE int64_t ATTR_CONST ATTR_FORCE_INLINE
+_mul_32x32(int32_t a, int32_t b)
 {
-	register INT64 result;
+	register int64_t result;
 
 	__asm__ (
 		" imull  %[b] ;"
 		: [result] "=A" (result)	/* result in edx:eax */
 		: [a]      "%a"  (a)		/* 'a' should also be in eax on entry */
 		, [b]      "rm"  (b)		/* 'b' can be memory or register */
-		: "%cc"						/* Clobbers condition codes */
+		: "cc" 						/* Clobbers condition codes */
 	);
 
 	return result;
@@ -109,17 +109,17 @@ _mul_32x32(INT32 a, INT32 b)
 
 #ifndef __x86_64__
 #define mulu_32x32 _mulu_32x32
-INLINE UINT64 ATTR_CONST ATTR_FORCE_INLINE
-_mulu_32x32(UINT32 a, UINT32 b)
+INLINE uint64_t ATTR_CONST ATTR_FORCE_INLINE
+_mulu_32x32(uint32_t a, uint32_t b)
 {
-	register UINT64 result;
+	register uint64_t result;
 
 	__asm__ (
 		" mull  %[b] ;"
 		: [result] "=A" (result)	/* result in edx:eax */
 		: [a]      "%a"  (a)		/* 'a' should also be in eax on entry */
 		, [b]      "rm"  (b)		/* 'b' can be memory or register */
-		: "%cc"						/* Clobbers condition codes */
+		: "cc" 						/* Clobbers condition codes */
 	);
 
 	return result;
@@ -135,10 +135,10 @@ _mulu_32x32(UINT32 a, UINT32 b)
 -------------------------------------------------*/
 
 #define mul_32x32_hi _mul_32x32_hi
-INLINE INT32 ATTR_CONST ATTR_FORCE_INLINE
-_mul_32x32_hi(INT32 a, INT32 b)
+INLINE int32_t ATTR_CONST ATTR_FORCE_INLINE
+_mul_32x32_hi(int32_t a, int32_t b)
 {
-    register INT32 result, temp;
+    register int32_t result, temp;
 
 	__asm__ (
 		" imull  %[b] ;"
@@ -160,10 +160,10 @@ _mul_32x32_hi(INT32 a, INT32 b)
 -------------------------------------------------*/
 
 #define mulu_32x32_hi _mulu_32x32_hi
-INLINE UINT32 ATTR_CONST ATTR_FORCE_INLINE
-_mulu_32x32_hi(UINT32 a, UINT32 b)
+INLINE uint32_t ATTR_CONST ATTR_FORCE_INLINE
+_mulu_32x32_hi(uint32_t a, uint32_t b)
 {
-    register UINT32 result, temp;
+    register uint32_t result, temp;
 
 	__asm__ (
 		" mull  %[b] ;"
@@ -187,10 +187,10 @@ _mulu_32x32_hi(UINT32 a, UINT32 b)
 
 #ifndef __x86_64__
 #define mul_32x32_shift _mul_32x32_shift
-INLINE INT32 ATTR_CONST ATTR_FORCE_INLINE
-_mul_32x32_shift(INT32 a, INT32 b, UINT8 shift)
+INLINE int32_t ATTR_CONST ATTR_FORCE_INLINE
+_mul_32x32_shift(int32_t a, int32_t b, uint8_t shift)
 {
-	register INT32 result;
+	register int32_t result;
 
 	/* Valid for (0 <= shift <= 31) */
 	__asm__ (
@@ -217,10 +217,10 @@ _mul_32x32_shift(INT32 a, INT32 b, UINT8 shift)
 
 #ifndef __x86_64__
 #define mulu_32x32_shift _mulu_32x32_shift
-INLINE UINT32 ATTR_CONST ATTR_FORCE_INLINE
-_mulu_32x32_shift(UINT32 a, UINT32 b, UINT8 shift)
+INLINE uint32_t ATTR_CONST ATTR_FORCE_INLINE
+_mulu_32x32_shift(uint32_t a, uint32_t b, uint8_t shift)
 {
-	register UINT32 result;
+	register uint32_t result;
 
 	/* Valid for (0 <= shift <= 31) */
 	__asm__ (
@@ -245,10 +245,10 @@ _mulu_32x32_shift(UINT32 a, UINT32 b, UINT8 shift)
 
 #ifndef __x86_64__
 #define div_64x32 _div_64x32
-INLINE INT32 ATTR_CONST ATTR_FORCE_INLINE
-_div_64x32(INT64 a, INT32 b)
+INLINE int32_t ATTR_CONST ATTR_FORCE_INLINE
+_div_64x32(int64_t a, int32_t b)
 {
-	register INT32 result, temp;
+	register int32_t result, temp;
 
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
 	__asm__ (
@@ -272,10 +272,10 @@ _div_64x32(INT64 a, INT32 b)
 
 #ifndef __x86_64__
 #define divu_64x32 _divu_64x32
-INLINE UINT32 ATTR_CONST ATTR_FORCE_INLINE
-_divu_64x32(UINT64 a, UINT32 b)
+INLINE uint32_t ATTR_CONST ATTR_FORCE_INLINE
+_divu_64x32(uint64_t a, uint32_t b)
 {
-	register UINT32 result, temp;
+	register uint32_t result, temp;
 
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
 	__asm__ (
@@ -300,10 +300,10 @@ _divu_64x32(UINT64 a, UINT32 b)
 
 #ifndef __x86_64__
 #define div_64x32_rem _div_64x32_rem
-INLINE INT32 ATTR_FORCE_INLINE
-_div_64x32_rem(INT64 dividend, INT32 divisor, INT32 *remainder)
+INLINE int32_t ATTR_FORCE_INLINE
+_div_64x32_rem(int64_t dividend, int32_t divisor, int32_t *remainder)
 {
-	register INT32 quotient;
+	register int32_t quotient;
 
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
 	__asm__ (
@@ -328,10 +328,10 @@ _div_64x32_rem(INT64 dividend, INT32 divisor, INT32 *remainder)
 
 #ifndef __x86_64__
 #define divu_64x32_rem _divu_64x32_rem
-INLINE UINT32 ATTR_FORCE_INLINE
-_divu_64x32_rem(UINT64 dividend, UINT32 divisor, UINT32 *remainder)
+INLINE uint32_t ATTR_FORCE_INLINE
+_divu_64x32_rem(uint64_t dividend, uint32_t divisor, uint32_t *remainder)
 {
-	register UINT32 quotient;
+	register uint32_t quotient;
 
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
 	__asm__ (
@@ -356,10 +356,10 @@ _divu_64x32_rem(UINT64 dividend, UINT32 divisor, UINT32 *remainder)
 
 #ifndef __x86_64__
 #define div_32x32_shift _div_32x32_shift
-INLINE INT32 ATTR_CONST ATTR_FORCE_INLINE
-_div_32x32_shift(INT32 a, INT32 b, UINT8 shift)
+INLINE int32_t ATTR_CONST ATTR_FORCE_INLINE
+_div_32x32_shift(int32_t a, int32_t b, uint8_t shift)
 {
-	register INT32 result;
+	register int32_t result;
 
 	/* Valid for (0 <= shift <= 31) */
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
@@ -388,10 +388,10 @@ _div_32x32_shift(INT32 a, INT32 b, UINT8 shift)
 
 #ifndef __x86_64__
 #define divu_32x32_shift _divu_32x32_shift
-INLINE UINT32 ATTR_CONST ATTR_FORCE_INLINE
-_divu_32x32_shift(UINT32 a, UINT32 b, UINT8 shift)
+INLINE uint32_t ATTR_CONST ATTR_FORCE_INLINE
+_divu_32x32_shift(uint32_t a, uint32_t b, uint8_t shift)
 {
-	register INT32 result;
+	register int32_t result;
 
 	/* Valid for (0 <= shift <= 31) */
 	/* Throws arithmetic exception if result doesn't fit in 32 bits */
@@ -419,10 +419,10 @@ _divu_32x32_shift(UINT32 a, UINT32 b, UINT8 shift)
 
 #ifndef __x86_64__
 #define mod_64x32 _mod_64x32
-INLINE INT32 ATTR_CONST ATTR_FORCE_INLINE
-_mod_64x32(INT64 a, INT32 b)
+INLINE int32_t ATTR_CONST ATTR_FORCE_INLINE
+_mod_64x32(int64_t a, int32_t b)
 {
-	register INT32 result, temp;
+	register int32_t result, temp;
 
 	/* Throws arithmetic exception if quotient doesn't fit in 32 bits */
 	__asm__ (
@@ -446,10 +446,10 @@ _mod_64x32(INT64 a, INT32 b)
 
 #ifndef __x86_64__
 #define modu_64x32 _modu_64x32
-INLINE UINT32 ATTR_CONST ATTR_FORCE_INLINE
-_modu_64x32(UINT64 a, UINT32 b)
+INLINE uint32_t ATTR_CONST ATTR_FORCE_INLINE
+_modu_64x32(uint64_t a, uint32_t b)
 {
-	register UINT32 result, temp;
+	register uint32_t result, temp;
 
 	/* Throws arithmetic exception if quotient doesn't fit in 32 bits */
 	__asm__ (
@@ -496,10 +496,10 @@ _recip_approx(float value)
 -------------------------------------------------*/
 
 #define count_leading_zeros _count_leading_zeros
-INLINE UINT8 ATTR_CONST ATTR_FORCE_INLINE
-_count_leading_zeros(UINT32 value)
+INLINE uint8_t ATTR_CONST ATTR_FORCE_INLINE
+_count_leading_zeros(uint32_t value)
 {
-	register UINT32 result;
+	register uint32_t result;
 
 	__asm__ (
 		"   bsrl  %[value], %[result] ;"
@@ -521,10 +521,10 @@ _count_leading_zeros(UINT32 value)
 -------------------------------------------------*/
 
 #define count_leading_ones _count_leading_ones
-INLINE UINT8 ATTR_CONST ATTR_FORCE_INLINE
-_count_leading_ones(UINT32 value)
+INLINE uint8_t ATTR_CONST ATTR_FORCE_INLINE
+_count_leading_ones(uint32_t value)
 {
-	register UINT32 result;
+	register uint32_t result;
 
 	__asm__ (
 		"   movl  %[value], %[result]  ;"
@@ -555,10 +555,10 @@ _count_leading_ones(UINT32 value)
 -------------------------------------------------*/
 
 #define compare_exchange32 _compare_exchange32
-INLINE INT32 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_compare_exchange32(INT32 volatile *ptr, INT32 compare, INT32 exchange)
+INLINE int32_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_compare_exchange32(int32_t volatile *ptr, int32_t compare, int32_t exchange)
 {
-	register INT32 result;
+	register int32_t result;
 
 	__asm__ __volatile__ (
 		" lock ; cmpxchgl  %[exchange], %[ptr] ;"
@@ -582,10 +582,10 @@ _compare_exchange32(INT32 volatile *ptr, INT32 compare, INT32 exchange)
 
 #ifdef __x86_64__
 #define compare_exchange64 _compare_exchange64
-INLINE INT64 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_compare_exchange64(INT64 volatile *ptr, INT64 compare, INT64 exchange)
+INLINE int64_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_compare_exchange64(int64_t volatile *ptr, int64_t compare, int64_t exchange)
 {
-	register INT64 result;
+	register int64_t result;
 
 	__asm__ __volatile__ (
 		" lock ; cmpxchgq  %[exchange], %[ptr] ;"
@@ -608,10 +608,10 @@ _compare_exchange64(INT64 volatile *ptr, INT64 compare, INT64 exchange)
 -------------------------------------------------*/
 
 #define atomic_exchange32 _atomic_exchange32
-INLINE INT32 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_atomic_exchange32(INT32 volatile *ptr, INT32 exchange)
+INLINE int32_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_atomic_exchange32(int32_t volatile *ptr, int32_t exchange)
 {
-	register INT32 result;
+	register int32_t result;
 
 	__asm__ __volatile__ (
 		" lock ; xchgl  %[exchange], %[ptr] ;"
@@ -631,10 +631,10 @@ _atomic_exchange32(INT32 volatile *ptr, INT32 exchange)
 -------------------------------------------------*/
 
 #define atomic_add32 _atomic_add32
-INLINE INT32 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_atomic_add32(INT32 volatile *ptr, INT32 delta)
+INLINE int32_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_atomic_add32(int32_t volatile *ptr, int32_t delta)
 {
-	register INT32 result = delta;
+	register int32_t result = delta;
 
 	__asm__ __volatile__ (
 		" lock ; xaddl  %[result], %[ptr] ;"
@@ -655,10 +655,10 @@ _atomic_add32(INT32 volatile *ptr, INT32 delta)
 -------------------------------------------------*/
 
 #define atomic_increment32 _atomic_increment32
-INLINE INT32 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_atomic_increment32(INT32 volatile *ptr)
+INLINE int32_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_atomic_increment32(int32_t volatile *ptr)
 {
-	register INT32 result = 1;
+	register int32_t result = 1;
 
 	__asm__ __volatile__ (
 		" lock ; xaddl  %[result], %[ptr] ;"
@@ -679,10 +679,10 @@ _atomic_increment32(INT32 volatile *ptr)
 -------------------------------------------------*/
 
 #define atomic_decrement32 _atomic_decrement32
-INLINE INT32 ATTR_NONNULL(1) ATTR_FORCE_INLINE
-_atomic_decrement32(INT32 volatile *ptr)
+INLINE int32_t ATTR_NONNULL(1) ATTR_FORCE_INLINE
+_atomic_decrement32(int32_t volatile *ptr)
 {
-	register INT32 result = -1;
+	register int32_t result = -1;
 
 	__asm__ __volatile__ (
 		" lock ; xaddl  %[result], %[ptr] ;"
@@ -711,27 +711,27 @@ _atomic_decrement32(INT32 volatile *ptr)
 #define get_profile_ticks _get_profile_ticks
 
 #ifndef __x86_64__
-INLINE INT64 ATTR_UNUSED ATTR_FORCE_INLINE _get_profile_ticks(void)
+INLINE int64_t ATTR_UNUSED ATTR_FORCE_INLINE _get_profile_ticks(void)
 {
-    UINT64 result;
+    uint64_t result;
     __asm__ __volatile__ (
             "rdtsc"
             : "=A" (result)
     );
-    return (INT64) (result & U64(0x7fffffffffffffff));
+    return (int64_t) (result & U64(0x7fffffffffffffff));
 }
 #else
-INLINE INT64 ATTR_UNUSED ATTR_FORCE_INLINE _get_profile_ticks(void)
+INLINE int64_t ATTR_UNUSED ATTR_FORCE_INLINE _get_profile_ticks(void)
 {
-	UINT64 result;
-    UINT32 r1, r2;
+	uint64_t result;
+    uint32_t r1, r2;
     __asm__ __volatile__ (
             "rdtsc"
             : "=a" (r1), "=d" (r2)
     );
 
-    result = ((UINT64)r2<<32) | (UINT64)r1;
-    return (INT64) (result & U64(0x7fffffffffffffff));
+    result = ((uint64_t)r2<<32) | (uint64_t)r1;
+    return (int64_t) (result & U64(0x7fffffffffffffff));
 }
 #endif
 

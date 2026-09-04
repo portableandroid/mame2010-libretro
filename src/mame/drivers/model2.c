@@ -100,22 +100,22 @@
 #include "sound/2612intf.h"
 #include "includes/model2.h"
 
-UINT32 *model2_bufferram, *model2_colorxlat;
-static UINT32 *model2_workram, *model2_backup1, *model2_backup2;
-UINT32 *model2_textureram0, *model2_textureram1, *model2_lumaram;
-UINT32 *model2_paletteram32;
-static UINT32 model2_intreq;
-static UINT32 model2_intena;
-static UINT32 model2_coproctl, model2_coprocnt, model2_geoctl, model2_geocnt;
-static UINT16 *model2_soundram = NULL;
+uint32_t *model2_bufferram, *model2_colorxlat;
+static uint32_t *model2_workram, *model2_backup1, *model2_backup2;
+uint32_t *model2_textureram0, *model2_textureram1, *model2_lumaram;
+uint32_t *model2_paletteram32;
+static uint32_t model2_intreq;
+static uint32_t model2_intena;
+static uint32_t model2_coproctl, model2_coprocnt, model2_geoctl, model2_geocnt;
+static uint16_t *model2_soundram = NULL;
 
-static UINT32 model2_timervals[4], model2_timerorig[4];
+static uint32_t model2_timervals[4], model2_timerorig[4];
 static int      model2_timerrun[4];
 static timer_device *model2_timers[4];
 static int model2_ctrlmode;
 static int analog_channel;
 
-static UINT32 *tgp_program;
+static uint32_t *tgp_program;
 
 enum {
 	DSP_TYPE_TGP	= 1,
@@ -127,20 +127,38 @@ static int dsp_type;
 
 
 
-#define COPRO_FIFOIN_SIZE	32000
+#define COPRO_FIFOIN_SIZE	0x20000
+/* Back-pressure between the i960 (producer) and the TGP (consumer) on the
+ * input FIFO.  When the TGP tries to pop from an empty FIFO it calls
+ * cpu_spinuntil_trigger to suspend itself until the i960 pushes new data
+ * and fires the matching trigger.  Without this the TGP burns its entire
+ * timeslice spinning on the same "read FIFOIN" instruction (the new
+ * MB86233 decoder correctly stalls and rolls back PC on empty reads,
+ * which is much more correct than the old behaviour of returning 0 and
+ * advancing, but if the TGP keeps getting re-entered it just burns
+ * cycles for no work). */
+#define COPRO_FIFOIN_TRIGGER		51401
 static int copro_fifoin_rpos, copro_fifoin_wpos;
-static UINT32 copro_fifoin_data[COPRO_FIFOIN_SIZE];
+static uint32_t copro_fifoin_data[COPRO_FIFOIN_SIZE];
 static int copro_fifoin_num = 0;
-static int copro_fifoin_pop(running_device *device, UINT32 *result)
+static int copro_fifoin_pop(running_device *device, uint32_t *result)
 {
-	UINT32 r;
+	uint32_t r;
 
 	if (copro_fifoin_num == 0)
 	{
 		if (dsp_type == DSP_TYPE_TGP)
+		{
+			/* Suspend the TGP until the i960 pushes - the producer side
+			 * fires the matching trigger in copro_fifoin_push.  This
+			 * eats the TGP's remaining icount so its scheduler slice
+			 * yields immediately rather than busy-spinning the rest of
+			 * the slice on a re-executing read. */
+			cpu_spinuntil_trigger(device, COPRO_FIFOIN_TRIGGER);
 			return 0;
+		}
 
-		fatalerror("Copro FIFOIN underflow (at %08X)", cpu_get_pc(device));
+		logerror("Copro FIFOIN underflow (at %08X)\n", cpu_get_pc(device));
 		return 0;
 	}
 
@@ -169,11 +187,16 @@ static int copro_fifoin_pop(running_device *device, UINT32 *result)
 	return 1;
 }
 
-static void copro_fifoin_push(running_device *device, UINT32 data)
+static void copro_fifoin_push(running_device *device, uint32_t data)
 {
 	if (copro_fifoin_num == COPRO_FIFOIN_SIZE)
 	{
-		fatalerror("Copro FIFOIN overflow (at %08X)", cpu_get_pc(device));
+		/* drop on overflow instead of killing the process - the i960 has
+		 * no back-pressure mechanism wired up to its push path, so a
+		 * burst that outruns the consumer would otherwise abort the
+		 * whole core via fatalerror.  Data loss here corrupts a frame's
+		 * geometry but the next frame recovers. */
+		logerror("Copro FIFOIN overflow (at %08X)\n", cpu_get_pc(device));
 		return;
 	}
 
@@ -187,6 +210,13 @@ static void copro_fifoin_push(running_device *device, UINT32 data)
 
 	copro_fifoin_num++;
 
+	/* Wake the TGP if it had stalled itself on an empty pop - the
+	 * scheduler resumes it on the next slice with the same PC the
+	 * stall rolled back to, so the previously-failed read retries
+	 * and now sees the data we just pushed. */
+	if (dsp_type == DSP_TYPE_TGP)
+		cpuexec_trigger(device->machine, COPRO_FIFOIN_TRIGGER);
+
 	// clear FIFO empty flag on SHARC
 	if (dsp_type == DSP_TYPE_SHARC)
 	{
@@ -195,13 +225,26 @@ static void copro_fifoin_push(running_device *device, UINT32 data)
 }
 
 
-#define COPRO_FIFOOUT_SIZE	32000
+#define COPRO_FIFOOUT_SIZE	0x20000
+/* Back-pressure between the TGP (producer) and i960 (consumer) on the
+ * output FIFO.  When the FIFO crosses the high-water mark the TGP
+ * voluntarily stalls via cpu_spinuntil_trigger; when the i960 pops
+ * data and the count drops below the low-water mark we wake the TGP
+ * back up by firing the trigger.  Two thresholds rather than one
+ * avoids the TGP repeatedly stalling and unstalling at every push
+ * when the FIFO sits near the boundary.  The trigger id is a magic
+ * number chosen to not collide with other devices that use the same
+ * scheduler-wide trigger namespace (voodoo uses 51324+index). */
+#define COPRO_FIFOOUT_TRIGGER		51400
+#define COPRO_FIFOOUT_HIGH_WATER	((COPRO_FIFOOUT_SIZE * 7) / 8)
+#define COPRO_FIFOOUT_LOW_WATER		(COPRO_FIFOOUT_SIZE / 8)
 static int copro_fifoout_rpos, copro_fifoout_wpos;
-static UINT32 copro_fifoout_data[COPRO_FIFOOUT_SIZE];
+static uint32_t copro_fifoout_data[COPRO_FIFOOUT_SIZE];
 static int copro_fifoout_num = 0;
-static UINT32 copro_fifoout_pop(const address_space *space)
+static int copro_fifoout_tgp_stalled = 0;
+static uint32_t copro_fifoout_pop(const address_space *space)
 {
-	UINT32 r;
+	uint32_t r;
 
 	if (copro_fifoout_num == 0)
 	{
@@ -223,6 +266,21 @@ static UINT32 copro_fifoout_pop(const address_space *space)
 
 	copro_fifoout_num--;
 
+	/* If the TGP put itself to sleep waiting for room on this FIFO,
+	 * and we have now drained below the low-water mark, wake it up.
+	 * This is the consumer half of the back-pressure pair; the
+	 * producer half is the cpu_spinuntil_trigger call in
+	 * copro_fifoout_push.  Without this the TGP-at-50MHz can outrun
+	 * the i960 consumer and pile data into the FIFO faster than the
+	 * i960 reads it, eventually overflowing and dropping geometry
+	 * mid-frame. */
+	if (copro_fifoout_tgp_stalled && copro_fifoout_num <= COPRO_FIFOOUT_LOW_WATER)
+	{
+		copro_fifoout_tgp_stalled = 0;
+		if (dsp_type == DSP_TYPE_TGP)
+			cpuexec_trigger(space->machine, COPRO_FIFOOUT_TRIGGER);
+	}
+
 //  logerror("COPRO FIFOOUT POP %08X, %f, %d\n", r, *(float*)&r,copro_fifoout_num);
 
 	// set SHARC flag 1: 0 if space available, 1 if FIFO full
@@ -241,12 +299,19 @@ static UINT32 copro_fifoout_pop(const address_space *space)
 	return r;
 }
 
-static void copro_fifoout_push(running_device *device, UINT32 data)
+static void copro_fifoout_push(running_device *device, uint32_t data)
 {
 	//if (copro_fifoout_wpos == copro_fifoout_rpos)
 	if (copro_fifoout_num == COPRO_FIFOOUT_SIZE)
 	{
-		fatalerror("Copro FIFOOUT overflow (at %08X)", cpu_get_pc(device));
+		/* drop on overflow instead of killing the process.  With the TGP
+		 * clocked at its real 50 MHz it can outrun the i960's poll on
+		 * the output FIFO during heavy frames; without a back-pressure
+		 * stall wired into the TGP push path, a burst would otherwise
+		 * abort the whole core via fatalerror.  Data loss here corrupts
+		 * a frame's geometry but the next frame recovers, which is a
+		 * much better failure mode than terminating the emulator. */
+		logerror("Copro FIFOOUT overflow (at %08X)\n", cpu_get_pc(device));
 		return;
 	}
 
@@ -259,6 +324,24 @@ static void copro_fifoout_push(running_device *device, UINT32 data)
 	}
 
 	copro_fifoout_num++;
+
+	/* Back-pressure: if the FIFO is filling faster than the i960 is
+	 * draining it, ask the TGP to stop running until the consumer
+	 * pops below the low-water mark.  cpu_spinuntil_trigger doesn't
+	 * abort this in-flight push - the data we just stored stays - but
+	 * marks the TGP as spinning on the next scheduler slice, so its
+	 * subsequent pushes don't happen until the matching cpuexec_trigger
+	 * in copro_fifoout_pop wakes it back up.  This matches what
+	 * upstream MAME does via its MB86234 stall() callback and keeps
+	 * frames from overflowing the FIFO and dropping geometry when the
+	 * 50 MHz TGP outpaces the i960. */
+	if (dsp_type == DSP_TYPE_TGP
+		&& !copro_fifoout_tgp_stalled
+		&& copro_fifoout_num >= COPRO_FIFOOUT_HIGH_WATER)
+	{
+		copro_fifoout_tgp_stalled = 1;
+		cpu_spinuntil_trigger(device, COPRO_FIFOOUT_TRIGGER);
+	}
 
 	// set SHARC flag 1: 0 if space available, 1 if FIFO full
 	if (dsp_type == DSP_TYPE_SHARC)
@@ -315,7 +398,7 @@ static READ32_HANDLER( timers_r )
 	if (model2_timerrun[offset])
 	{
 		// get elapsed time, convert to units of 25 MHz
-		UINT32 cur = attotime_to_double(attotime_mul(model2_timers[offset]->time_elapsed(), 25000000));
+		uint32_t cur = attotime_to_double(attotime_mul(model2_timers[offset]->time_elapsed(), 25000000));
 
 		// subtract units from starting value
 		model2_timervals[offset] = model2_timerorig[offset] - cur;
@@ -380,6 +463,16 @@ static MACHINE_RESET(model2_common)
 	model2_timers[3] = machine->device<timer_device>("timer3");
 	for (i=0; i<4; i++)
 		model2_timers[i]->reset();
+
+	/* Reset the copro FIFOs so a soft reset doesn't leave the TGP
+	 * stalled forever waiting on a trigger we'll never fire. */
+	copro_fifoin_num = 0;
+	copro_fifoin_rpos = 0;
+	copro_fifoin_wpos = 0;
+	copro_fifoout_num = 0;
+	copro_fifoout_rpos = 0;
+	copro_fifoout_wpos = 0;
+	copro_fifoout_tgp_stalled = 0;
 }
 
 static MACHINE_RESET(model2o)
@@ -437,9 +530,17 @@ static MACHINE_RESET(model2c)
 	dsp_type = DSP_TYPE_TGPX4;
 }
 
-static void chcolor(running_machine *machine, pen_t color, UINT16 data)
+static void chcolor(running_machine *machine, pen_t color, uint16_t data)
 {
-	palette_set_color_rgb(machine, color, pal5bit(data >> 0), pal5bit(data >> 5), pal5bit(data >> 10));
+	uint8_t r = pal5bit(data >> 0);
+	uint8_t g = pal5bit(data >> 5);
+	uint8_t b = pal5bit(data >> 10);
+
+	r = model2_gamma_table[r];
+	g = model2_gamma_table[g];
+	b = model2_gamma_table[b];
+
+	palette_set_color_rgb(machine, color, r, g, b);
 }
 
 static WRITE32_HANDLER( pal32_w )
@@ -471,7 +572,7 @@ static WRITE32_HANDLER( analog_2b_w )
 
 static READ32_HANDLER( fifoctl_r )
 {
-	UINT32 r = 0;
+	uint32_t r = 0;
 
 	if (copro_fifoout_num == 0)
 	{
@@ -489,7 +590,7 @@ static READ32_HANDLER( videoctl_r )
 
 static CUSTOM_INPUT( _1c00000_r )
 {
-	UINT32 ret = input_port_read(field->port->machine, "IN0");
+	uint32_t ret = input_port_read(field->port->machine, "IN0");
 
 	if(model2_ctrlmode == 0)
 	{
@@ -504,7 +605,7 @@ static CUSTOM_INPUT( _1c00000_r )
 
 static CUSTOM_INPUT( _1c0001c_r )
 {
-	UINT32 iptval = 0x00ff;
+	uint32_t iptval = 0x00ff;
 	if(analog_channel < 4)
 	{
 		static const char *const ports[] = { "ANA0", "ANA1", "ANA2", "ANA3" };
@@ -583,7 +684,7 @@ static CUSTOM_INPUT( _1c0001c_r )
 
 */
 
-static UINT16 cmd_data;
+static uint16_t cmd_data;
 
 static CUSTOM_INPUT( rchase2_devices_r )
 {
@@ -601,7 +702,7 @@ static WRITE32_HANDLER( rchase2_devices_w )
 		cmd_data = data;
 }
 
-static UINT8 driveio_comm_data;
+static uint8_t driveio_comm_data;
 
 static WRITE32_HANDLER( srallyc_devices_w )
 {
@@ -645,6 +746,18 @@ static READ32_HANDLER( copro_ctl1_r )
    return model2_coproctl;
 }
 
+/* Polled by the i960 in a busy loop after kicking the copro.  Returns
+ * all-ones until at least one dword has been uploaded into the copro
+ * program memory; zero afterwards.  VF2 hits PC 0x10FD8 hundreds of
+ * times per frame on this register; without it the unmapped logger
+ * fires from every poll. */
+static READ32_HANDLER( copro_status_r )
+{
+   if (model2_coprocnt == 0)
+      return 0xffffffffU;
+   return 0;
+}
+
 static WRITE32_HANDLER( copro_ctl1_w )
 {
 	// did hi bit change?
@@ -673,8 +786,8 @@ static WRITE32_HANDLER( copro_ctl1_w )
 
 static WRITE32_HANDLER(copro_function_port_w)
 {
-	UINT32 d = data & 0x800fffff;
-	UINT32 a = (offset >> 2) & 0xff;
+	uint32_t d = data & 0x800fffff;
+	uint32_t a = (offset >> 2) & 0xff;
 	d |= a << 23;
 
 	//logerror("copro_function_port_w: %08X, %08X, %08X\n", data, offset, mem_mask);
@@ -716,7 +829,7 @@ static WRITE32_HANDLER(copro_fifo_w)
 }
 
 static int iop_write_num = 0;
-static UINT32 iop_data = 0;
+static uint32_t iop_data = 0;
 static WRITE32_HANDLER(copro_sharc_iop_w)
 {
 	/* FIXME: clean this up */
@@ -754,8 +867,8 @@ static WRITE32_HANDLER(copro_sharc_iop_w)
 /*****************************************************************************/
 /* GEO */
 
-UINT32 geo_read_start_address = 0;
-UINT32 geo_write_start_address = 0;
+uint32_t geo_read_start_address = 0;
+uint32_t geo_write_start_address = 0;
 
 static WRITE32_HANDLER( geo_ctl1_w )
 {
@@ -827,7 +940,7 @@ static WRITE32_HANDLER(geo_sharc_fifo_w)
 }
 
 static int geo_iop_write_num = 0;
-static UINT32 geo_iop_data = 0;
+static uint32_t geo_iop_data = 0;
 static WRITE32_HANDLER(geo_sharc_iop_w)
 {
     if ((strcmp(space->machine->gamedrv->name, "schamp" ) == 0))
@@ -851,7 +964,7 @@ static WRITE32_HANDLER(geo_sharc_iop_w)
 #endif
 
 
-static void push_geo_data(UINT32 data)
+static void push_geo_data(uint32_t data)
 {
 	//mame_printf_debug("push_geo_data: %08X: %08X\n", 0x900000+geo_write_start_address, data);
 	model2_bufferram[geo_write_start_address/4] = data;
@@ -904,7 +1017,7 @@ static WRITE32_HANDLER( geo_w )
 		/*if (data & 0x80000000)
         {
             int i;
-            UINT32 a;
+            uint32_t a;
             mame_printf_debug("GEO: jump to %08X\n", (data & 0xfffff));
             a = (data & 0xfffff) / 4;
             for (i=0; i < 4; i++)
@@ -931,7 +1044,7 @@ static WRITE32_HANDLER( geo_w )
 
 		if (data & 0x80000000)
 		{
-			UINT32 r = 0;
+			uint32_t r = 0;
 			r |= data & 0x800fffff;
 			r |= ((address >> 4) & 0x3f) << 23;
 			push_geo_data(r);
@@ -940,7 +1053,7 @@ static WRITE32_HANDLER( geo_w )
 		{
 			if ((address & 0xf) == 0)
 			{
-				UINT32 r = 0;
+				uint32_t r = 0;
 				r |= data & 0x000fffff;
 				r |= ((address >> 4) & 0x3f) << 23;
 				push_geo_data(r);
@@ -985,7 +1098,7 @@ static READ32_HANDLER(daytona_unk_r)
 
 static READ32_HANDLER(desert_unk_r)
 {
-   static UINT8 test;
+   static uint8_t test;
 
 	test ^= 8;
 	// vcop needs bit 3 clear (infinite loop otherwise)
@@ -1017,7 +1130,7 @@ static WRITE32_HANDLER(model2_irq_w)
 	}
 
 	model2_intreq &= data;
-   UINT32 irq_ack = data ^ 0xffffffff;
+   uint32_t irq_ack = data ^ 0xffffffff;
 
 	if(irq_ack & 1<<0)
 		cputag_set_input_line(space->machine, "maincpu", I960_IRQ0, CLEAR_LINE);
@@ -1087,7 +1200,7 @@ static WRITE32_HANDLER( model2_serial_w )
 
 /* Protection handling */
 
-static const UINT8 ZGUNProt[] =
+static const uint8_t ZGUNProt[] =
 {
 	0x7F,0x4E,0x1B,0x1E,0xA8,0x48,0xF5,0x49,0x31,0x32,0x4A,0x09,0x89,0x29,0xC0,0x41,
 	0x3A,0x49,0x85,0x24,0xA0,0x4D,0x21,0x31,0xEA,0xC3,0x3F,0xAF,0x0E,0x4B,0x25,0x02,
@@ -1098,17 +1211,33 @@ static const UINT8 ZGUNProt[] =
 	0x94,0xD5,0x73,0x09,0xE4,0x3D,0x2D,0x92,0xC9,0xA7,0xA3,0x53,0x42,0x82,0x55,0x67,
 	0xE4,0x66,0xD0,0x4A,0x7D,0x4A,0x13,0xDE,0xD7,0x9F,0x38,0xAA,0x00,0x56,0x85,0x0A
 };
-static const UINT8 DCOPKey1326[]=
+static const uint8_t DCOPKey1326[]=
 {
 	0x43,0x66,0x54,0x11,0x99,0xfe,0xcc,0x8e,0xdd,0x87,0x11,0x89,0x22,0xdf,0x44,0x09
 };
 static int protstate, protpos;
-static UINT8 protram[256];
+static uint8_t protram[256];
+/* 32 KB of RAM the protection chip presents at 0x01d80000-0x01d87fff on
+ * real boards (model2_0229_mem in upstream).  DOA's i960 writes seed
+ * bytes into the low end of this window during the protection handshake
+ * (PC=0x2a3c hammers offsets 0..5) and may later read them back as part
+ * of normal data structures - the protection chip is wired to a RAM
+ * window plus a few control regs at the very top, not a single
+ * write-only port.  Without backing this with real storage every write
+ * to the protection RAM area is silently dropped, every read returns
+ * zero, and any pointer or counter the firmware tries to keep here
+ * comes back as a literal NULL on the next access.  That's exactly the
+ * shape of bug we see now in DOA: the firmware proceeds past the
+ * protection step, hits a code path that wants to dereference data it
+ * had previously stored in this RAM, gets zero, and ends up either
+ * spinning on a stale character-select frame or chasing a corrupted
+ * pointer (e.g. unmapped reads from 0x7FFFD918). */
+static uint32_t prot_ram[0x2000];
 
 static READ32_HANDLER( model2_prot_r )
 {
 	static int a = 0;
-	UINT32 retval = 0;
+	uint32_t retval = 0;
 
 	if (offset == 0x10000/4)
 	{
@@ -1134,6 +1263,14 @@ static READ32_HANDLER( model2_prot_r )
 		else
 			return 0xfff0;
 	}
+	else if (offset < 0x2000)
+	{
+		/* Fall through to the backing RAM window.  Reads to offsets the
+		 * specific-purpose branches above didn't claim just return
+		 * whatever the i960 (or another path through this very handler)
+		 * last stored there. */
+		return prot_ram[offset];
+	}
 	else logerror("Unhandled Protection READ @ %x mask %x (PC=%x)\n", offset, mem_mask, cpu_get_pc(space->cpu));
 
 	return retval;
@@ -1141,6 +1278,9 @@ static READ32_HANDLER( model2_prot_r )
 
 static WRITE32_HANDLER( model2_prot_w )
 {
+	uint32_t orig_data = data;
+	uint32_t orig_mask = mem_mask;
+
 	if (mem_mask == 0xffff0000)
 	{
 		data >>= 16;
@@ -1204,6 +1344,24 @@ static WRITE32_HANDLER( model2_prot_w )
 			strcpy((char *)protram, "  TECMO LTD.  DEAD OR ALIVE  1996.10.22  VER. 1.00");
 		}
 	}
+	else if (offset == 0x7ff4/4)
+	{
+		/* data_w_doa on upstream - the i960 streams data bytes here to
+		 * be encrypted/decrypted by the 0229 protection device.  We
+		 * don't implement the crypto, but absorbing the write keeps the
+		 * log clean and lets the firmware progress past the streaming
+		 * phase. */
+	}
+	else if (offset < 0x2000)
+	{
+		/* RAM backing window - store the write in our buffer so a later
+		 * read at the same offset returns the same value.  Use the
+		 * original (un-shifted) data with the original mask so partial
+		 * writes (bytes / halfwords) compose correctly. */
+		uint32_t v = prot_ram[offset];
+		v = (v & ~orig_mask) | (orig_data & orig_mask);
+		prot_ram[offset] = v;
+	}
 	else logerror("Unhandled Protection WRITE %x @ %x mask %x (PC=%x)\n", data, offset, mem_mask, cpu_get_pc(space->cpu));
 
 }
@@ -1214,7 +1372,7 @@ static int model2_maxxstate = 0;
 
 static READ32_HANDLER( maxx_r )
 {
-	UINT32 *ROM = (UINT32 *)memory_region(space->machine, "maincpu");
+	uint32_t *ROM = (uint32_t *)memory_region(space->machine, "maincpu");
 
 	if (offset <= 0x1f/4)
 	{
@@ -1255,7 +1413,7 @@ static READ32_HANDLER( maxx_r )
 
 /* Network board emulation */
 
-static UINT32 model2_netram[0x8000/4];
+static uint32_t model2_netram[0x8000/4];
 
 static int zflagi, zflag, sysres;
 
@@ -1399,11 +1557,22 @@ static ADDRESS_MAP_START( model2_base_mem, ADDRESS_SPACE_PROGRAM, 32 )
 
 
 	AM_RANGE(0x00980004, 0x00980007) AM_READ(fifoctl_r)
-	AM_RANGE(0x0098000c, 0x0098000f) AM_READ(videoctl_r)
+	AM_RANGE(0x0098000c, 0x0098000f) AM_READ(videoctl_r) AM_WRITENOP
+	AM_RANGE(0x00980014, 0x00980017) AM_READ(copro_status_r)
+
+	/* CPU wait-state / configuration registers - i960 internal,
+	 * the maincpu writes 14 dwords here once at boot to configure
+	 * its bus.  Real hardware accepts these; we just need somewhere
+	 * for them to land so the unmapped-memory logger doesn't fire. */
+	AM_RANGE(0x00e00000, 0x00e0003f) AM_RAM
 
 	AM_RANGE(0x00e80000, 0x00e80007) AM_READWRITE(model2_irq_r, model2_irq_w)
 
 	AM_RANGE(0x00f00000, 0x00f0000f) AM_READWRITE(timers_r, timers_w)
+	/* Single stray write at boot from PC 0x8B4; not modelled by
+	 * upstream either, but logging it every reset is noisy.  NOP
+	 * so the boot path stays silent. */
+	AM_RANGE(0x00f80000, 0x00f80003) AM_WRITENOP
 
 	AM_RANGE(0x01000000, 0x0100ffff) AM_READWRITE(sys24_tile32_r, sys24_tile32_w) AM_MIRROR(0x100000)
 	AM_RANGE(0x01020000, 0x01020003) AM_WRITENOP AM_MIRROR(0x100000)		// Unknown, always 0
@@ -1451,11 +1620,25 @@ static ADDRESS_MAP_START( model2o_mem, ADDRESS_SPACE_PROGRAM, 32 )
 
 	AM_RANGE(0x01c00000, 0x01c00003) AM_READ_PORT("1c00000")
 	AM_RANGE(0x01c00004, 0x01c00007) AM_READ_PORT("1c00004")
-	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010")
-	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014")
-	AM_RANGE(0x01c0001c, 0x01c0001f) AM_READ( desert_unk_r )
-	AM_RANGE(0x01c00040, 0x01c00043) AM_READ( daytona_unk_r )
+	/* Gaps in the I/O register region get poked at thousands of times
+	 * per frame by Daytona (looking for dual-port-RAM-mailbox slots the
+	 * original hardware has at 0x01c00000-0x01c00fff that 2010 doesn't
+	 * fully model).  Each unmapped access fires the generic
+	 * "unmapped program memory" logger, which under libretro's log
+	 * callback ends up being expensive enough on its own to dominate
+	 * the per-frame budget.  Cover the gaps and the missing write sides
+	 * with explicit NOPs so the accesses become silent fall-throughs
+	 * instead of going through the unmapped-handler logging path. */
+	AM_RANGE(0x01c00008, 0x01c0000f) AM_READNOP AM_WRITENOP
+	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010") AM_WRITENOP
+	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014") AM_WRITENOP
+	AM_RANGE(0x01c00018, 0x01c0001b) AM_READNOP AM_WRITENOP
+	AM_RANGE(0x01c0001c, 0x01c0001f) AM_READ( desert_unk_r ) AM_WRITENOP
+	AM_RANGE(0x01c00020, 0x01c0003f) AM_READNOP AM_WRITENOP
+	AM_RANGE(0x01c00040, 0x01c00043) AM_READ( daytona_unk_r ) AM_WRITENOP
+	AM_RANGE(0x01c00044, 0x01c000ff) AM_READNOP AM_WRITENOP
 	AM_RANGE(0x01c00200, 0x01c002ff) AM_RAM AM_BASE( &model2_backup2 )
+	AM_RANGE(0x01c00300, 0x01c00fff) AM_READNOP AM_WRITENOP
 	AM_RANGE(0x01c80000, 0x01c80003) AM_READWRITE( model2_serial_r, model2o_serial_w )
 
 	AM_IMPORT_FROM(model2_base_mem)
@@ -1486,7 +1669,14 @@ static ADDRESS_MAP_START( model2a_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014") AM_WRITENOP
 	AM_RANGE(0x01c00018, 0x01c0001b) AM_READ( hotd_unk_r )
 	AM_RANGE(0x01c0001c, 0x01c0001f) AM_READ_PORT("1c0001c") AM_WRITE( analog_2b_w )
+	/* 315-5649 I/O chip control registers - VF2 writes "SEGA" (0x53 0x45
+	 * 0x47 0x41) to 0x01c00034/0x01c00038 and a heartbeat pattern to
+	 * 0x01c00024 / 0x01c00044 during boot.  These are output ports that
+	 * we don't model; absorbing the writes silently keeps the boot log
+	 * readable so other diagnostics remain visible. */
+	AM_RANGE(0x01c00020, 0x01c0003f) AM_READNOP AM_WRITENOP
    AM_RANGE(0x01c00040, 0x01c00043) AM_WRITENOP
+	AM_RANGE(0x01c00044, 0x01c000ff) AM_READNOP AM_WRITENOP
 	AM_RANGE(0x01c80000, 0x01c80003) AM_READWRITE( model2_serial_r, model2_serial_w )
 
 	AM_IMPORT_FROM(model2_base_mem)
@@ -1498,7 +1688,11 @@ static ADDRESS_MAP_START( model2b_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 
 	AM_RANGE(0x00804000, 0x00807fff) AM_READWRITE(geo_prg_r, geo_prg_w)
 	//AM_RANGE(0x00804000, 0x00807fff) AM_READWRITE(geo_sharc_fifo_r, geo_sharc_fifo_w)
-	//AM_RANGE(0x00840000, 0x00840fff) AM_WRITE(geo_sharc_iop_w)
+	/* geo SHARC IOP window - firmware writes here during geo boot
+	 * (0x0084003C, 0x00840070, 0x00840100-0x00840108).  We don't model
+	 * the geo-side SHARC IOP, so silently absorb the writes instead of
+	 * flooding the unmapped-memory logger once per game boot. */
+	AM_RANGE(0x00840000, 0x00840fff) AM_WRITENOP
 
 	AM_RANGE(0x00880000, 0x00883fff) AM_WRITE(copro_function_port_w)
 	AM_RANGE(0x00884000, 0x00887fff) AM_READWRITE(copro_fifo_r, copro_fifo_w)
@@ -1509,6 +1703,11 @@ static ADDRESS_MAP_START( model2b_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x00980008, 0x0098000b) AM_WRITE( geo_ctl1_w )
 	//AM_RANGE(0x00980008, 0x0098000b) AM_WRITE( geo_sharc_ctl1_w )
 
+	/* SHARC bank control reg - all games just set this to 0 during
+	 * copro/geo program upload.  We don't need the value, just silence
+	 * the unmapped-memory logger. */
+	AM_RANGE(0x00980020, 0x00980023) AM_WRITENOP
+
 	AM_RANGE(0x009c0000, 0x009cffff) AM_READWRITE( model2_serial_r, model2_serial_w )
 
 	AM_RANGE(0x11000000, 0x111fffff) AM_RAM	AM_BASE(&model2_textureram0)	// texture RAM 0 (2b/2c)
@@ -1518,9 +1717,16 @@ static ADDRESS_MAP_START( model2b_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 
 	AM_RANGE(0x01c00000, 0x01c00003) AM_READ_PORT("1c00000") AM_WRITE( ctrl0_w )
 	AM_RANGE(0x01c00004, 0x01c00007) AM_READ_PORT("1c00004")
-	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010")
-	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014")
-	AM_RANGE(0x01c00018, 0x01c0001b) AM_READ( hotd_unk_r )
+	AM_RANGE(0x01c00008, 0x01c0000f) AM_READNOP AM_WRITENOP
+	/* The 315-5649 I/O chip's port-direction registers configure these
+	 * 8-bit ports as outputs on some boards.  DOA in particular hammers
+	 * 0x01c00010 with alternating 0x5E / 0x4E lamp values every cycle of
+	 * its main wait loop, which spams the unmapped-memory logger and
+	 * makes the rest of the log unreadable.  Pair the existing read
+	 * mappings with WRITENOP so the writes are silently absorbed. */
+	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010") AM_WRITENOP
+	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014") AM_WRITENOP
+	AM_RANGE(0x01c00018, 0x01c0001b) AM_READ( hotd_unk_r ) AM_WRITENOP
 	AM_RANGE(0x01c0001c, 0x01c0001f) AM_READ_PORT("1c0001c") AM_WRITE( analog_2b_w )
    AM_RANGE(0x01c00040, 0x01c00043) AM_WRITENOP
 	AM_RANGE(0x01c80000, 0x01c80003) AM_READWRITE( model2_serial_r, model2_serial_w )
@@ -1533,10 +1739,13 @@ static ADDRESS_MAP_START( model2c_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x00200000, 0x0023ffff) AM_RAM
 
 	AM_RANGE(0x00804000, 0x00807fff) AM_READWRITE(geo_prg_r, geo_prg_w)
+	/* See comment in model2b_crx_mem above. */
+	AM_RANGE(0x00840000, 0x00840fff) AM_WRITENOP
 	AM_RANGE(0x00884000, 0x00887fff) AM_READWRITE(copro_prg_r, copro_prg_w)
 
    AM_RANGE(0x00980000, 0x00980003) AM_READWRITE(copro_ctl1_r,copro_ctl1_w)
 	AM_RANGE(0x00980008, 0x0098000b) AM_WRITE( geo_ctl1_w )
+	AM_RANGE(0x00980020, 0x00980023) AM_WRITENOP
 	AM_RANGE(0x009c0000, 0x009cffff) AM_READWRITE( model2_serial_r, model2_serial_w )
 
 	AM_RANGE(0x11000000, 0x111fffff) AM_RAM	AM_BASE(&model2_textureram0)	// texture RAM 0 (2b/2c)
@@ -1545,9 +1754,10 @@ static ADDRESS_MAP_START( model2c_crx_mem, ADDRESS_SPACE_PROGRAM, 32 )
 
 	AM_RANGE(0x01c00000, 0x01c00003) AM_READ_PORT("1c00000") AM_WRITE( ctrl0_w )
 	AM_RANGE(0x01c00004, 0x01c00007) AM_READ_PORT("1c00004")
-	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010")
-	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014")
-	AM_RANGE(0x01c00018, 0x01c0001b) AM_READ( hotd_unk_r )
+	AM_RANGE(0x01c00008, 0x01c0000f) AM_READNOP AM_WRITENOP
+	AM_RANGE(0x01c00010, 0x01c00013) AM_READ_PORT("1c00010") AM_WRITENOP
+	AM_RANGE(0x01c00014, 0x01c00017) AM_READ_PORT("1c00014") AM_WRITENOP
+	AM_RANGE(0x01c00018, 0x01c0001b) AM_READ( hotd_unk_r ) AM_WRITENOP
 	AM_RANGE(0x01c0001c, 0x01c0001f) AM_READ_PORT("1c0001c") AM_WRITE( analog_2b_w )
 	AM_RANGE(0x01c80000, 0x01c80003) AM_READWRITE( model2_serial_r, model2_serial_w )
 
@@ -1893,12 +2103,25 @@ static WRITE16_HANDLER( m1_snd_68k_latch2_w )
 static ADDRESS_MAP_START( model1_snd, ADDRESS_SPACE_PROGRAM, 16 )
 	AM_RANGE(0x000000, 0x07ffff) AM_ROM
 	AM_RANGE(0x080000, 0x0bffff) AM_ROM AM_REGION("audiocpu", 0x20000)	// mirror of second program ROM
+	/* Daytona's audio M68k pokes into 0x0c0000-0x0c1ffff every frame -
+	 * looks like a polled mailbox slot that has no register on the
+	 * Model 1 sound board.  Cover the gap with READNOP/WRITENOP so the
+	 * unmapped-memory logger doesn't fire every audio frame; with the
+	 * libretro log callback enabled the logger spam is what was
+	 * actually capping in-game FPS in the 40s, not the SCSP/M68k or
+	 * the TGP. */
+	AM_RANGE(0xc00000, 0xc1ffff) AM_READNOP AM_WRITENOP
 	AM_RANGE(0xc20000, 0xc20001) AM_READWRITE( m1_snd_68k_latch_r, m1_snd_68k_latch1_w )
 	AM_RANGE(0xc20002, 0xc20003) AM_READWRITE( m1_snd_v60_ready_r, m1_snd_68k_latch2_w )
 	AM_RANGE(0xc40000, 0xc40007) AM_DEVREADWRITE8( "sega1", multipcm_r, multipcm_w, 0x00ff )
 	AM_RANGE(0xc40012, 0xc40013) AM_WRITENOP
 	AM_RANGE(0xc50000, 0xc50001) AM_DEVWRITE( "sega1", m1_snd_mpcm_bnk_w )
 	AM_RANGE(0xc60000, 0xc60007) AM_DEVREADWRITE8( "sega2", multipcm_r, multipcm_w, 0x00ff )
+	/* Parallel of 0xc40012 for the second MultiPCM ("sega2") - the audio
+	 * firmware writes the same control byte to both chips' c?0012 mute
+	 * registers.  Upstream's segam1audio map only NOPs c40012, but the
+	 * 2010 logger spammed once per boot regardless; cover c60012 too. */
+	AM_RANGE(0xc60012, 0xc60013) AM_WRITENOP
 	AM_RANGE(0xc70000, 0xc70001) AM_DEVWRITE( "sega2", m1_snd_mpcm_bnk_w )
 	AM_RANGE(0xd00000, 0xd00007) AM_DEVREADWRITE8( "ymsnd", ym3438_r, ym3438_w, 0x00ff )
 	AM_RANGE(0xf00000, 0xf0ffff) AM_RAM
@@ -1911,7 +2134,7 @@ static WRITE16_HANDLER( model2snd_ctrl )
 	// handle sample banking
 	if (memory_region_length(space->machine, "scsp") > 0x800000)
 	{
-		UINT8 *snd = memory_region(space->machine, "scsp");
+		uint8_t *snd = memory_region(space->machine, "scsp");
 		if (data & 0x20)
 		{
 			memory_set_bankptr(space->machine, "bank4", snd + 0x200000);
@@ -1961,7 +2184,7 @@ static const scsp_interface scsp_config =
 
 static READ32_HANDLER(copro_sharc_input_fifo_r)
 {
-	UINT32 result = 0;
+	uint32_t result = 0;
 	//mame_printf_debug("SHARC FIFOIN pop at %08X\n", cpu_get_pc(space->cpu));
 
 	copro_fifoin_pop(space->machine->device("dsp"), &result);
@@ -2036,7 +2259,7 @@ static MACHINE_DRIVER_START( model2o )
 	MDRV_CPU_ADD("audiocpu", M68000, 10000000)
 	MDRV_CPU_PROGRAM_MAP(model1_snd)
 
-	MDRV_CPU_ADD("tgp", MB86233, 16000000)
+	MDRV_CPU_ADD("tgp", MB86233, 50000000)
 	MDRV_CPU_CONFIG(tgp_config)
 	MDRV_CPU_PROGRAM_MAP(copro_tgp_map)
 
@@ -2092,7 +2315,7 @@ static MACHINE_DRIVER_START( model2a )
 	MDRV_CPU_ADD("audiocpu", M68000, 12000000)
 	MDRV_CPU_PROGRAM_MAP(model2_snd)
 
-	MDRV_CPU_ADD("tgp", MB86233, 16000000)
+	MDRV_CPU_ADD("tgp", MB86233, 50000000)
 	MDRV_CPU_CONFIG(tgp_config)
 	MDRV_CPU_PROGRAM_MAP(copro_tgp_map)
 
@@ -4978,7 +5201,7 @@ static DRIVER_INIT( genprot )
 
 static DRIVER_INIT( pltkids )
 {
-	UINT32 *ROM = (UINT32 *)memory_region(machine, "maincpu");
+	uint32_t *ROM = (uint32_t *)memory_region(machine, "maincpu");
 
 	memory_install_readwrite32_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), 0x01d80000, 0x01dfffff, 0, 0, model2_prot_r, model2_prot_w);
 	protstate = protpos = 0;
@@ -4989,7 +5212,7 @@ static DRIVER_INIT( pltkids )
 
 static DRIVER_INIT( zerogun )
 {
-	UINT32 *ROM = (UINT32 *)memory_region(machine, "maincpu");
+	uint32_t *ROM = (uint32_t *)memory_region(machine, "maincpu");
 
 	memory_install_readwrite32_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), 0x01d80000, 0x01dfffff, 0, 0, model2_prot_r, model2_prot_w);
 	protstate = protpos = 0;
@@ -5032,7 +5255,7 @@ static WRITE32_HANDLER( jaleco_network_w )
 
 static DRIVER_INIT( sgt24h )
 {
-	UINT32 *ROM = (UINT32 *)memory_region(machine, "maincpu");
+	uint32_t *ROM = (uint32_t *)memory_region(machine, "maincpu");
 
 	memory_install_readwrite32_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), 0x01d80000, 0x01dfffff, 0, 0, model2_prot_r, model2_prot_w);
 	memory_install_readwrite32_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), 0x01a10000, 0x01a1ffff, 0, 0, jaleco_network_r, jaleco_network_w);
@@ -5053,7 +5276,7 @@ static DRIVER_INIT( overrev )
 
 static DRIVER_INIT( doa )
 {
-	UINT32 *ROM = (UINT32 *)memory_region(machine, "maincpu");
+	uint32_t *ROM = (uint32_t *)memory_region(machine, "maincpu");
 
 	memory_install_readwrite32_handler(cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM), 0x01d80000, 0x01dfffff, 0, 0, model2_prot_r, model2_prot_w);
 	protstate = protpos = 0;

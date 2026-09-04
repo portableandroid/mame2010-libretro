@@ -13,6 +13,17 @@ NATIVE :=0
 UNAME=$(shell uname -a)
 BUILD_BIN2C ?= 0
 
+# Accept DEBUG=1 as a convenience alias for MDEBUG=1.  MAME upstream and
+# most libretro cores use DEBUG=1 to request -O0 -g, and that is what
+# people reach for first; the internal flag here is MDEBUG to avoid a
+# clash with any -DDEBUG macro consumers might expect.  Promote DEBUG to
+# MDEBUG when only the former is set so either invocation works.
+ifeq ($(MDEBUG),)
+ifeq ($(DEBUG),1)
+MDEBUG := 1
+endif
+endif
+
 ifeq ($(platform),)
 platform = unix
 ifeq ($(UNAME),)
@@ -25,8 +36,6 @@ else ifneq ($(findstring win,$(UNAME)),)
    platform = win
 endif
 endif
-
-$(info Building for platform '$(platform)')
 
 # system platform
 system_platform = unix
@@ -90,8 +99,6 @@ endif
 # which is already located at ./precompile
 
 
-VRENDER ?= soft
-
 PLATCFLAGS += -D__LIBRETRO__
 CCOMFLAGS  += -D__LIBRETRO__
 
@@ -101,24 +108,25 @@ ALIGNED = 0
 # If X86_SH2DRC = 1 , X86-SH2 dynamic recompile code is enabled at compile time, and if X86_SH2DRC = 0 , it is not used.
 X86_SH2DRC = 1
 
-ifeq ($(VRENDER),opengl)  
-	PLATCFLAGS += -DHAVE_OPENGL
-	CCOMFLAGS  += -DHAVE_OPENGL
-endif
-
 UNAME=$(shell uname -m)
 
 ifeq ($(firstword $(filter x86_64,$(UNAME))),x86_64)
-PTR64 = 1
+PTR64 ?= 1
 endif
 ifeq ($(firstword $(filter amd64,$(UNAME))),amd64)
-PTR64 = 1
+PTR64 ?= 1
 endif
 ifeq ($(firstword $(filter ppc64,$(UNAME))),ppc64)
-PTR64 = 1
+PTR64 ?= 1
 endif
 ifneq (,$(findstring mingw64-w64,$(PATH)))
-PTR64=1
+PTR64 ?= 1
+endif
+ifeq ($(firstword $(filter arm64,$(UNAME))),arm64)
+PTR64 ?= 1
+endif
+ifeq ($(firstword $(filter aarch64,$(UNAME))),aarch64)
+PTR64 ?= 1
 endif
 ifneq (,$(findstring Power,$(UNAME)))
 BIGENDIAN=1
@@ -141,18 +149,15 @@ ifeq ($(BUILD_BIN2C), 1)
    CCOMFLAGS += -DCOMPILE_DATS
 endif
    PLATCFLAGS += -fstrict-aliasing -fno-merge-constants
-ifeq ($(VRENDER),opengl)  
-   LIBS += -lGL
-endif
 LDFLAGS += $(SHARED)
    NATIVELD = g++
    NATIVELDFLAGS = -Wl,--warn-common -lstdc++
    NATIVECC = g++
    NATIVECFLAGS = -std=gnu99
-   CC_AS = gcc 
-   CC = g++
-   AR = @ar
-   LD = g++ 
+   CC_AS ?= gcc
+   CC ?= g++
+   AR ?= @ar
+   LD ?= g++
    CCOMFLAGS += $(PLATCFLAGS) -ffast-math  
    LIBS += -lstdc++ -lpthread 
 
@@ -171,8 +176,9 @@ ARM_ENABLED = 1
    ALIGNED=1
    FORCE_DRC_C_BACKEND = 1
    CCOMFLAGS += -mstructure-size-boundary=32 -mthumb-interwork -falign-functions=16 -fsigned-char -finline  -fno-common -fno-builtin -fweb -frename-registers -falign-functions=16 -fsingle-precision-constant
-   PLATCFLAGS += -march=armv7-a -mfloat-abi=softfp -fstrict-aliasing -fno-merge-constants -DSDLMAME_NO64BITIO -DANDTIME -DRANDPATH
+   PLATCFLAGS += -march=armv7-a -mfpu=neon -mfloat-abi=softfp -fstrict-aliasing -fno-merge-constants -DSDLMAME_NO64BITIO -DANDTIME -DRANDPATH
    PLATCFLAGS += -DANDROID
+   HAVE_NEON = 1
    LDFLAGS += -Wl,--fix-cortex-a8 -llog $(SHARED)
    NATIVELD = g++
    NATIVELDFLAGS = -Wl,--warn-common -lstdc++
@@ -184,20 +190,41 @@ ARM_ENABLED = 1
 # OS X
 else ifeq ($(platform), osx)
    TARGETLIB := $(TARGET_NAME)_libretro.dylib
-	TARGETOS = macosx
+   TARGETOS = macosx
    fpic = -fPIC
-LDFLAGSEMULATOR +=  -stdlib=libc++
+   LIBCPLUSPLUS := -stdlib=libc++
+   LDFLAGSEMULATOR +=  $(LIBCPLUSPLUS)
    SHARED := -dynamiclib
-   CC = c++ -stdlib=libc++
-   LD = c++ -stdlib=libc++
-   NATIVELD = c++ -stdlib=libc++
+   CC ?= c++
+   LD ?= c++ 
+   NATIVELD = c++
    NATIVECC = c++
-	LDFLAGS +=  $(SHARED)
-   CC_AS = clang
-   AR = @ar
+   CC_AS ?= clang
+   CFLAGS += $(LIBCPLUSPLUS)
+   CXXFLAGS += $(LIBCPLUSPLUS)
+   LDFLAGS +=  $(SHARED) $(LIBCPLUSPLUS)
+   AR ?= @ar
 ifeq ($(COMMAND_MODE),"legacy")
 ARFLAGS = -crs
 endif
+   ifeq ($(shell uname -p),arm)
+	ARM_ENABLED = 1
+	X86_SH2DRC = 0
+	FORCE_DRC_C_BACKEND = 1
+        PTR64 = 1
+   endif
+   ifeq ($(CROSS_COMPILE),1)
+	TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+	CFLAGS   += $(TARGET_RULE)
+	CPPFLAGS += $(TARGET_RULE)
+	CXXFLAGS += $(TARGET_RULE)
+	LDFLAGS  += $(TARGET_RULE)
+
+	# TODO/FIXME - force DRC c backend for now - find a way to make this dependent on the architecture being targeted
+	ARM_ENABLED = 1
+	X86_SH2DRC = 0
+	FORCE_DRC_C_BACKEND = 1
+   endif
 
 # iOS
 else ifneq (,$(findstring ios,$(platform)))
@@ -214,10 +241,12 @@ ifeq ($(IOSSDK),)
 IOSSDK := $(shell xcodebuild -version -sdk iphoneos Path)
 endif
 ifeq ($(platform),ios-arm64)
-   CC = c++ -arch arm64 -isysroot $(IOSSDK)
+   CC = c++ -arch arm64 -isysroot $(IOSSDK) -miphoneos-version-min=8.0
+   CXX = c++ -arch arm64 -isysroot $(IOSSDK) -miphoneos-version-min=8.0
    PTR64 = 1
 else
    CC = c++ -arch armv7 -isysroot $(IOSSDK)
+   CXX = c++ -arch armv7 -isysroot $(IOSSDK)
 endif
    CCOMFLAGS += -DSDLMAME_NO64BITIO -DIOS
    CFLAGS += -DIOS
@@ -230,22 +259,25 @@ endif
 else ifeq ($(platform), tvos-arm64)
 
    TARGETLIB := $(TARGET_NAME)_libretro_tvos.dylib
+
+ifeq ($(IOSSDK),)
+IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+endif
+
    TARGETOS = macosx
    EXTRA_RULES = 1
    ARM_ENABLED = 1
    fpic = -fPIC
    SHARED := -dynamiclib
    PTR64 = 1
+   CC = c++ -arch arm64 -isysroot $(IOSSDK) -mappletvos-version-min=11.0
+   CXX = c++ -arch arm64 -isysroot $(IOSSDK) -mappletvos-version-min=11.0
    CCOMFLAGS += -DSDLMAME_NO64BITIO -DIOS
    CFLAGS += -DIOS
    CXXFLAGS += -DIOS
    NATIVELD = $(CC) -stdlib=libc++
    LDFLAGS +=  $(SHARED)
    LD = $(CXX)
-
-ifeq ($(IOSSDK),)
-IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
-endif
 
 # QNX
 else ifeq ($(platform), qnx)
@@ -333,7 +365,7 @@ else ifeq ($(platform), wiiu)
    CC = $(DEVKITPPC)/bin/powerpc-eabi-g++$(EXE_EXT)
    CXX = $(DEVKITPPC)/bin/powerpc-eabi-g++$(EXE_EXT)
    AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
-   COMMONFLAGS += -DGEKKO -mwup -mcpu=750 -meabi -mhard-float -D__POWERPC__ -D__ppc__ -DWORDS_BIGENDIAN=1 -malign-natural 
+   COMMONFLAGS += -DGEKKO -mcpu=750 -meabi -mhard-float -D__POWERPC__ -D__ppc__ -DWORDS_BIGENDIAN=1 -malign-natural 
    COMMONFLAGS += -U__INT32_TYPE__ -U __UINT32_TYPE__ -D__INT32_TYPE__=int -fsingle-precision-constant -mno-bit-align
    COMMONFLAGS += -DHAVE_STRTOUL -DBIGENDIAN=1 -DWIIU -DOLEFIX
    DEFS       += -DMSB_FIRST
@@ -379,12 +411,13 @@ else ifeq ($(platform), classic_armv7_a7)
  # (armv8 a35, hard point, neon based) ### 
 # Playstation Classic 
 else ifeq ($(platform), classic_armv8_a35)
-	TARGET := $(TARGET_NAME)_libretro.so
-  TARGETOS=linux
-  EXTRA_RULES = 1
-  ARM_ENABLED = 1
+   TARGETLIB := $(TARGET_NAME)_libretro.so
+   PTR64 = 0
+   TARGETOS=linux
+   EXTRA_RULES = 1
+   ARM_ENABLED = 1
 	fpic := -fPIC
-	SHARED := -shared -Wl,--version-script=link.T -Wl,--no-undefined
+   SHARED := -shared -Wl,--no-undefined
 	CXXFLAGS += -Ofast \
 	-flto=4 -fwhole-program -fuse-linker-plugin \
 	-fdata-sections -ffunction-sections -Wl,--gc-sections \
@@ -393,20 +426,13 @@ else ifeq ($(platform), classic_armv8_a35)
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-unroll-loops \
 	-fmerge-all-constants -fno-math-errno \
 	-marm -mtune=cortex-a8 -mfpu=neon-fp-armv8 -mfloat-abi=hard
-	CFLAGS += $(CXXFLAGS)
+   CFLAGS += $(CXXFLAGS) -march=armv8-a
 	HAVE_NEON = 1
 	ARCH = arm
 	BUILTIN_GPU = neon
-#	USE_DYNAREC = 1
-	ifeq ($(shell echo `$(CC) -dumpversion` "< 4.9" | bc -l), 1)
-	  CFLAGS += -march=armv8-a
-	else
-	  CFLAGS += -march=armv8-a
-	  # If gcc is 5.0 or later
-	  ifeq ($(shell echo `$(CC) -dumpversion` ">= 5" | bc -l), 1)
-	    LDFLAGS += -static-libgcc -static-libstdc++
-	  endif
-	endif
+   BUILD_ZLIB=1
+   LIBS += -lstdc++ -lpthread
+   LDFLAGS += $(SHARED)
 #######################################
 
 #   LITE:=1
@@ -473,13 +499,13 @@ else ifeq ($(platform), wincross)
 	NATIVELD = $(LD)
 	CC_AS ?= gcc
 
-	SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=src/osd/retro/link.T
+	SHARED := -shared -static-libgcc -static-libstdc++ -Wl,--version-script=src/osd/retro/link.T
+ifneq ($(MDEBUG),1)
+	SHARED += -s
+endif
 	CCOMFLAGS +=-D__WIN32__ -D__WIN32_LIBRETRO__ 
 ifeq ($(BUILD_BIN2C), 1)
 	CCOMFLAGS += -DCOMPILE_DATS
-endif
-ifeq ($(VRENDER),opengl)  
-	LIBS += -lopengl32
 endif
 	LDFLAGS +=   $(SHARED)
 	EXE = .exe
@@ -489,10 +515,11 @@ endif
 else
    TARGETLIB := $(TARGET_NAME)_libretro.dll
 	TARGETOS = win32
-	CC = g++
-	LD = g++
+	CC ?= g++
+	LD ?= g++
 	NATIVELD = $(LD)
-	CC_AS = gcc
+	CC_AS ?= gcc
+   BUILD_ZLIB = 1
 	SHARED := -shared -static-libgcc -static-libstdc++ -Wl,--version-script=src/osd/retro/link.T
 ifneq ($(MDEBUG),1)
 	SHARED += -s
@@ -501,16 +528,21 @@ CCOMFLAGS += -D__WIN32__ -D__WIN32_LIBRETRO__
 ifeq ($(BUILD_BIN2C), 1)
 	CCOMFLAGS += -DCOMPILE_DATS
 endif
-ifeq ($(VRENDER),opengl)  
-	LIBS += -lopengl32
-endif
 	LDFLAGS +=   $(SHARED)
 	EXE = .exe
 	DEFS = -DCRLF=3
 	DEFS += -DX64_WINDOWS_ABI
 endif
 
-
+ifneq (,$(or $(findstring webos,$(CROSS_COMPILE)),$(findstring starfish,$(CROSS_COMPILE))))
+  FORCE_DRC_C_BACKEND = 1
+  CCOMFLAGS += -DWEBOS
+  ifneq (,$(findstring aarch64,$(CROSS_COMPILE)))
+    PTR64 = 1
+  else
+    PTR64 = 0
+  endif
+endif
 
 ifeq ($(ALIGNED),1)
 	PLATCFLAGS += -DALIGN_INTS -DALIGN_SHORTS 
@@ -554,7 +586,6 @@ CROSS_BUILD_OSD = retro
 
 # uncomment and specify suffix to be added to the name
 # SUFFIX =
-
 
 
 #-------------------------------------------------
@@ -644,15 +675,12 @@ DEFS       += -DMSB_FIRST
 PLATCFLAGS += -DMSB_FIRST
 endif
 
-# define PTR64 if we are a 64-bit target
-ifeq ($(PTR64),1)
-DEFS += -DPTR64
-endif
+# PTR64 is auto-detected in src/osd/osdcomm.h via __SIZEOF_POINTER__,
+# so we no longer need to pass it as a -D flag. The Makefile variable
+# $(PTR64) is still consulted below (and in Makefile.common) to pick the
+# DRC backend object file.
 
 DEFS += -DNDEBUG 
-
-# need to ensure FLAC functions are statically linked
-DEFS += -DFLAC__NO_DLL
 
 # CFLAGS is defined based on C or C++ targets
 # (remember, expansion only happens when used, so doing it here is ok)
@@ -674,6 +702,11 @@ CCOMFLAGS += -pipe
 
 ifeq ($(MDEBUG),1)
 CCOMFLAGS +=  -O0 -g
+# -O0 surfaces additional uninitialized / unused-result warnings that
+# the optimized build hides; with -Werror they would block the debug
+# build for reasons unrelated to debuggability.  Turn -Werror off for
+# debug unless the caller already forced NOWERROR.
+NOWERROR ?= 1
 else
 # add the optimization flag
 CCOMFLAGS += -O$(OPTIMIZE)
@@ -796,13 +829,9 @@ tools: maketree $(TOOLS)
 maketree: $(sort $(OBJDIRS))
 
 clean: $(OSDCLEAN)
-	@echo Deleting object tree $(OBJ)...
 	$(RM) -r obj
-	@echo Deleting $(EMULATOR)...
 	$(RM) $(EMULATOR)
-	@echo Deleting $(TOOLS)...
 	$(RM) $(TOOLS)
-	@echo Deleting dependencies...
 	$(RM) depend_mame.mak
 	$(RM) depend_mess.mak
 	$(RM) depend_ume.mak
@@ -837,7 +866,6 @@ endif
 # executable targets and dependencies
 #-------------------------------------------------
 $(EMULATOR): $(OBJECTS)
-	@echo Linking $(TARGETLIB)
 ifeq ($(platform), wiiu)
 ifeq ($(LITE),1)
 	echo $(LDFLAGS) $(LDFLAGSEMULATOR) $^ $(LIBS) -o $(TARGETLIB)
@@ -847,7 +875,7 @@ else
 	$(AR) -M < full.mri
 endif
 else
-	$(LD) $(LDFLAGS) $(LDFLAGSEMULATOR) $^ $(LIBS) -o $(TARGETLIB)
+	$(CXX) $(LDFLAGS) $(LDFLAGSEMULATOR) $^ $(LIBS) -o $(TARGETLIB)
 endif
 
 #endif
@@ -855,34 +883,28 @@ endif
 # generic rules
 #-------------------------------------------------
 
-ifeq ($(ARM_ENABLED), 1)
-CFLAGS += -DARM_ENABLED
-endif
-
 ifeq ($(X86_SH2DRC), 0)
 CFLAGS += -DDISABLE_SH2DRC
 endif
 
 $(OBJ)/%.o: $(CORE_DIR)/src/%.c | $(OSPREBUILD)
-	$(CC) $(CDEFS) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CDEFS) $(CFLAGS) -c $< -o $@
 
 $(OBJ)/%.o: $(OBJ)/%.c | $(OSPREBUILD)
-	$(CC) $(CDEFS) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CDEFS) $(CFLAGS) -c $< -o $@
 
 $(OBJ)/%.pp: $(CORE_DIR)/src/%.c | $(OSPREBUILD)
-	$(CC) $(CDEFS) $(CFLAGS) -E $< -o $@
+	$(CXX) $(CDEFS) $(CFLAGS) -E $< -o $@
 
 $(OBJ)/%.s: $(CORE_DIR)/src/%.c | $(OSPREBUILD)
-	$(CC) $(CDEFS) $(CFLAGS) -S $< -o $@
+	$(CXX) $(CDEFS) $(CFLAGS) -S $< -o $@
 
 $(DRIVLISTOBJ): $(DRIVLISTSRC)
-	$(CC) $(CDEFS) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CDEFS) $(CFLAGS) -c $< -o $@
 
 $(DRIVLISTSRC): $(CORE_DIR)/src/$(TARGET)/$(SUBTARGET).lst $(MAKELIST_TARGET)
-	@echo Building driver list $<...
-	@$(MAKELIST) $< >$@
+	$(MAKELIST) $< >$@
 
 $(OBJ)/%.a:
-	@echo Archiving $@...
 	$(RM) $@
 	$(AR) $(ARFLAGS) $@ $^

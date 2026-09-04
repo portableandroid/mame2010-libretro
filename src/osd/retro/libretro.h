@@ -174,13 +174,27 @@ extern "C" {
 #define RETRO_DEVICE_ID_MOUSE_MIDDLE     6
 
 /* Id values for LIGHTGUN types. */
+#define RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X        13 /*Absolute Position*/
+#define RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y        14 /*Absolute*/
+#define RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN    15 /*Status Check*/
+#define RETRO_DEVICE_ID_LIGHTGUN_TRIGGER          2
+#define RETRO_DEVICE_ID_LIGHTGUN_RELOAD          16 /*Forced off-screen shot*/
+#define RETRO_DEVICE_ID_LIGHTGUN_AUX_A            3
+#define RETRO_DEVICE_ID_LIGHTGUN_AUX_B            4
+#define RETRO_DEVICE_ID_LIGHTGUN_START            6
+#define RETRO_DEVICE_ID_LIGHTGUN_SELECT           7
+#define RETRO_DEVICE_ID_LIGHTGUN_AUX_C            8
+#define RETRO_DEVICE_ID_LIGHTGUN_DPAD_UP          9
+#define RETRO_DEVICE_ID_LIGHTGUN_DPAD_DOWN       10
+#define RETRO_DEVICE_ID_LIGHTGUN_DPAD_LEFT       11
+#define RETRO_DEVICE_ID_LIGHTGUN_DPAD_RIGHT      12
+/* deprecated */
 #define RETRO_DEVICE_ID_LIGHTGUN_X        0
 #define RETRO_DEVICE_ID_LIGHTGUN_Y        1
 #define RETRO_DEVICE_ID_LIGHTGUN_TRIGGER  2
 #define RETRO_DEVICE_ID_LIGHTGUN_CURSOR   3
 #define RETRO_DEVICE_ID_LIGHTGUN_TURBO    4
 #define RETRO_DEVICE_ID_LIGHTGUN_PAUSE    5
-#define RETRO_DEVICE_ID_LIGHTGUN_START    6
 
 /* Id values for POINTER. */
 #define RETRO_DEVICE_ID_POINTER_X         0
@@ -850,6 +864,14 @@ enum retro_mod
                                            /* unsigned * --
                                             * Returns the specified language of the frontend, if specified by the user.
                                             * It can be used by the core for localization purposes.
+                                            */
+
+#define RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE (81 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+                                           /* unsigned * --
+                                            * Returns the audio sample rate the frontend is targeting, in Hz.
+                                            * The core can use the result to select an ideal output rate.
+                                            * Returns true if the environment call is available, regardless of
+                                            * the value stored in data.
                                             */
 
 #define RETRO_MEMDESC_CONST     (1 << 0)   /* The frontend will never change this memory area once retro_load_game has returned. */

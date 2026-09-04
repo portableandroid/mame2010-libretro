@@ -159,10 +159,10 @@ void state_save_allow_registration(running_machine *machine, int allowed);
 int state_save_registration_allowed(running_machine *machine);
 
 /* register an array of data in memory */
-void state_save_register_memory(running_machine *machine, const char *module, const char *tag, UINT32 index, const char *name, void *val, UINT32 valsize, UINT32 valcount, const char *file, int line);
+void state_save_register_memory(running_machine *machine, const char *module, const char *tag, uint32_t index, const char *name, void *val, uint32_t valsize, uint32_t valcount, const char *file, int line);
 
 /* register a bitmap to be saved */
-void state_save_register_bitmap(running_machine *machine, const char *module, const char *tag, UINT32 index, const char *name, bitmap_t *val, const char *file, int line);
+void state_save_register_bitmap(running_machine *machine, const char *module, const char *tag, uint32_t index, const char *name, bitmap_t *val, const char *file, int line);
 
 
 
@@ -187,12 +187,17 @@ state_save_error state_save_write_file(running_machine *machine, mame_file *file
 /* read in a save state file */
 state_save_error state_save_read_file(running_machine *machine, mame_file *file);
 
+/* libretro: uncompressed in-memory save/restore */
+uint32_t state_save_get_size(running_machine *machine);
+state_save_error state_save_write_buffer(running_machine *machine, void *buf, size_t size);
+state_save_error state_save_read_buffer(running_machine *machine, const void *buf, size_t size);
+
 
 
 /* ----- debugging ----- */
 
 /* return an item with the given index */
-const char *state_save_get_indexed_item(running_machine *machine, int index, void **base, UINT32 *valsize, UINT32 *valcount);
+const char *state_save_get_indexed_item(running_machine *machine, int index, void **base, uint32_t *valsize, uint32_t *valcount);
 
 /* dump the registry to the logfile */
 void state_save_dump_registry(running_machine *machine);

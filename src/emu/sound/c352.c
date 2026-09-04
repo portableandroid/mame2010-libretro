@@ -44,24 +44,24 @@ enum {
 
 typedef struct
 {
-	UINT8	vol_l;
-	UINT8	vol_r;
-	UINT8	vol_l2;
-	UINT8	vol_r2;
-	UINT8	bank;
-	INT16	noise;
-	INT16   noisebuf;
-	UINT16  noisecnt;
-	UINT16	pitch;
-	UINT16	start_addr;
-	UINT16	end_addr;
-	UINT16	repeat_addr;
-	UINT32	flag;
+	uint8_t	vol_l;
+	uint8_t	vol_r;
+	uint8_t	vol_l2;
+	uint8_t	vol_r2;
+	uint8_t	bank;
+	int16_t	noise;
+	int16_t   noisebuf;
+	uint16_t  noisecnt;
+	uint16_t	pitch;
+	uint16_t	start_addr;
+	uint16_t	end_addr;
+	uint16_t	repeat_addr;
+	uint32_t	flag;
 
-	UINT16	start;
-	UINT16	repeat;
-	UINT32	current_addr;
-	UINT32	pos;
+	uint16_t	start;
+	uint16_t	repeat;
+	uint32_t	current_addr;
+	uint32_t	pos;
 } c352_ch_t;
 
 typedef struct _c352_state c352_state;
@@ -70,7 +70,7 @@ struct _c352_state
 	sound_stream *stream;
 	c352_ch_t c352_ch[32];
 	unsigned char *c352_rom_samples;
-	UINT32 c352_rom_length;
+	uint32_t c352_rom_length;
 	int sample_rate_base;
 
 	long	channel_l[2048*2];
@@ -116,10 +116,10 @@ static void c352_mix_one_channel(c352_state *info, unsigned long ch, long sample
 
 	signed short sample, nextsample;
 	signed short noisebuf;
-	UINT16 noisecnt;
-	INT32 frequency, delta, offset, cnt, flag;
-	UINT32 bank;
-	UINT32 pos, len;
+	uint16_t noisecnt;
+	int32_t frequency, delta, offset, cnt, flag;
+	uint32_t bank;
+	uint32_t pos, len;
 
 	frequency = info->c352_ch[ch].pitch;
 	delta=frequency;
@@ -203,7 +203,13 @@ static void c352_mix_one_channel(c352_state *info, unsigned long ch, long sample
 		// apply linear interpolation
 		if ( (flag & (C352_FLG_FILTER | C352_FLG_NOISE)) == 0 )
 		{
-			sample = (short)(sample + ((nextsample-sample) * (((double)(0x0000ffff&offset) )/0x10000)));
+			// 16.16 fixed-point linear interpolation (was a per-sample double multiply).
+			// Bit-identical to the old float path (frac is an exact binary fraction,
+			// products fit in an int64, truncation toward zero matches the (short) cast).
+			{
+				int64_t interp = ((int64_t)sample << 16) + (int64_t)(nextsample - sample) * (int)(offset & 0xffff);
+				sample = (short)(interp >= 0 ? (interp >> 16) : -((-interp) >> 16));
+			}
 		}
 
 		if ( flag & C352_FLG_PHASEFL )
@@ -540,11 +546,19 @@ static void c352_init(c352_state *info, running_device *device)
 static DEVICE_START( c352 )
 {
 	c352_state *info = get_safe_token(device);
+	const c352_interface *intf = (const c352_interface *)device->baseconfig().static_config();
+	int divider = (intf != NULL && intf->divider != 0) ? intf->divider : 192;
 
 	info->c352_rom_samples = *device->region();
 	info->c352_rom_length = device->region()->bytes();
 
-	info->sample_rate_base = device->clock() / 192;
+	/* The C352's output sample rate is input_clock / divider, where the
+	 * divider matches the chip's per-voice processing cycle. The historical
+	 * default in this codebase is 192, which existing drivers were tuned
+	 * against. New/corrected drivers can pass a c352_interface with the
+	 * spec-correct divider (288) and a matching 1.5x clock to get the same
+	 * effective output rate via hardware-honest math. */
+	info->sample_rate_base = device->clock() / divider;
 
 	info->stream = stream_create(device, 0, 4, info->sample_rate_base, info, c352_update);
 

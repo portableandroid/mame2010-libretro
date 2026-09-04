@@ -36,20 +36,18 @@ Registers per channel:
 #include "emu.h"
 #include "streams.h"
 #include "gaelco.h"
-#include "wavwrite.h"
 
 #define VERBOSE_SOUND 0
 #define VERBOSE_READ_WRITES 0
 #define LOG_SOUND(x) do { if (VERBOSE_SOUND) logerror x; } while (0)
 #define LOG_READ_WRITES(x) do { if (VERBOSE_READ_WRITES) logerror x; } while (0)
 
-#define LOG_WAVE  0
 //#define ALT_MIX
 
 #define GAELCO_NUM_CHANNELS 	0x07
 #define VOLUME_LEVELS			0x10
 
-UINT16 *gaelco_sndregs;
+uint16_t *gaelco_sndregs;
 
 /* this structure defines a channel */
 typedef struct _gaelco_sound_channel gaelco_sound_channel;
@@ -65,15 +63,14 @@ typedef struct _gaelco_sound_state gaelco_sound_state;
 struct _gaelco_sound_state
 {
 	sound_stream *stream;									/* our stream */
-	UINT8 *snd_data;										/* PCM data */
+	uint8_t *snd_data;										/* PCM data */
 	int banks[4];											/* start of each ROM bank */
 	gaelco_sound_channel channel[GAELCO_NUM_CHANNELS];	/* 7 stereo channels */
 
 	/* table for converting from 8 to 16 bits with volume control */
-	INT16 volume_table[VOLUME_LEVELS][256];
+	int16_t volume_table[VOLUME_LEVELS][256];
 };
 
-static wav_file *	wavraw;					/* raw waveform */
 
 INLINE gaelco_sound_state *get_safe_token(running_device *device)
 {
@@ -183,9 +180,6 @@ static STREAM_UPDATE( gaelco_update )
 		outputs[0][j] = output_l;
 		outputs[1][j] = output_r;
 	}
-
-	if (wavraw)
-		wav_add_data_32lr(wavraw, outputs[0], outputs[1], samples, 0);
 }
 
 /*============================================================================
@@ -259,7 +253,7 @@ static DEVICE_START( gaelco )
 		info->banks[j] = intf->banks[j];
 	}
 	info->stream = stream_create(device, 0, 2, 8000, info, gaelco_update);
-	info->snd_data = (UINT8 *)memory_region(device->machine, intf->gfxregion);
+	info->snd_data = (uint8_t *)memory_region(device->machine, intf->gfxregion);
 	if (info->snd_data == NULL)
 		info->snd_data = *device->region();
 
@@ -269,17 +263,11 @@ static DEVICE_START( gaelco )
 			info->volume_table[vol][(j ^ 0x80) & 0xff] = (vol*j*256)/(VOLUME_LEVELS - 1);
 		}
 	}
-
-	if (LOG_WAVE)
-		wavraw = wav_open("gae1_snd.wav", 8000, 2);
 }
 
 
 static DEVICE_STOP( gaelco )
 {
-	if (wavraw)
-		wav_close(wavraw);
-	wavraw = NULL;
 }
 
 

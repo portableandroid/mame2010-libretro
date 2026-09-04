@@ -13,6 +13,9 @@
           the test relies on executing out of the cache while it tromps
           over (and eventually restores) the instructions it is executing;
           this will likely never be fixed
+        * waitstates on memory access are only modelled for the boot EPROMs
+          (during the blue-screen bootup sequence); other regions still
+          assume zero-waitstate timing
 
 ****************************************************************************
 
@@ -141,11 +144,12 @@ Notes:
 
 
 /* local variables */
-static UINT32 *rambase, *rambase2, *rombase;
-static UINT32 *video_base;
-static UINT32 *kinst_control;
+static uint32_t *rambase, *rambase2, *rombase;
+static uint32_t *video_base;
+static uint32_t *kinst_control;
+static uint32_t *kinst_speedup;
 
-static const UINT8 *control_map;
+static const uint8_t *control_map;
 
 
 
@@ -158,7 +162,7 @@ static const UINT8 *control_map;
 static MACHINE_START( kinst )
 {
 	running_device *ide = machine->device("ide");
-	UINT8 *features = ide_get_features(ide);
+	uint8_t *features = ide_get_features(ide);
 
 	if (strncmp(machine->gamedrv->name, "kinst2", 6) != 0)
 	{
@@ -192,10 +196,17 @@ static MACHINE_START( kinst )
 	/* set the fastest DRC options */
 	mips3drc_set_options(machine->device("maincpu"), MIPS3DRC_FASTEST_OPTIONS);
 
-	/* configure fast RAM regions for DRC */
+	/* the boot EPROM mapping is no longer pulled into the address map via
+	 * AM_BASE; grab the region pointer here so the rom_r handler can
+	 * service reads against it */
+	rombase = (uint32_t *)memory_region(machine, "user1");
+
+	/* configure fast RAM regions for DRC -- note the boot ROM region is
+	 * deliberately omitted so that the DRC dispatches ROM reads through
+	 * the rom_r handler, which charges 128 RdRdy waitstates per access to
+	 * match the EPROM bus timing on real hardware */
 	mips3drc_add_fastram(machine->device("maincpu"), 0x08000000, 0x087fffff, FALSE, rambase2);
 	mips3drc_add_fastram(machine->device("maincpu"), 0x00000000, 0x0007ffff, FALSE, rambase);
-	mips3drc_add_fastram(machine->device("maincpu"), 0x1fc00000, 0x1fc7ffff, TRUE,  rombase);
 }
 
 
@@ -227,14 +238,14 @@ static VIDEO_UPDATE( kinst )
 	/* loop over rows and copy to the destination */
 	for (y = cliprect->min_y; y <= cliprect->max_y; y++)
 	{
-		UINT32 *src = &video_base[640/4 * y];
-		UINT16 *dest = BITMAP_ADDR16(bitmap, y, cliprect->min_x);
+		uint32_t *src = &video_base[640/4 * y];
+		uint16_t *dest = BITMAP_ADDR16(bitmap, y, cliprect->min_x);
 		int x;
 
 		/* loop over columns */
 		for (x = cliprect->min_x; x < cliprect->max_x; x += 2)
 		{
-			UINT32 data = *src++;
+			uint32_t data = *src++;
 
 			/* store two pixels */
 			*dest++ = (data >>  0) & 0x7fff;
@@ -311,7 +322,7 @@ static WRITE32_DEVICE_HANDLER( kinst_ide_extra_w )
 
 static READ32_HANDLER( kinst_control_r )
 {
-	UINT32 result;
+	uint32_t result;
 	static const char *const portnames[] = { "P1", "P2", "VOLUME", "UNUSED", "DSW" };
 
 	/* apply shuffling */
@@ -346,7 +357,7 @@ static READ32_HANDLER( kinst_control_r )
 
 static WRITE32_HANDLER( kinst_control_w )
 {
-	UINT32 olddata;
+	uint32_t olddata;
 
 	/* apply shuffling */
 	offset = control_map[offset / 2];
@@ -378,6 +389,86 @@ static WRITE32_HANDLER( kinst_control_w )
 
 
 
+static READ32_HANDLER( rom_r )
+{
+	/* Add RdRdy clocks on every EPROM access. The four boot EPROMs at
+	 * U98/U102/U103/U104 are slow relative to the 50MHz R4600; on real
+	 * hardware accesses to them are stretched by the bus controller via
+	 * RdRdy, which the previous mapping (direct AM_ROM into the DRC
+	 * fastram table) did not model. The visible symptom was the blue-screen
+	 * bootup running approximately twice as fast as real hardware -- about
+	 * three seconds instead of the seven-or-so seconds it takes on the PCB.
+	 * The DCS sound CPU has not finished its own startup self-test by then,
+	 * so when the main CPU subsequently jumps into the attract loop and
+	 * tries to start the music, the latch write is dropped on the floor and
+	 * attract-mode music stays silent until the player enters and exits
+	 * service mode (which gives the sound CPU another chance to settle).
+	 *
+	 * 128 cycles per access lines up the boot timing well enough that the
+	 * sound CPU is ready by the time the attract loop wants music. Note
+	 * that this is the EPROM bus waitstate count, not a CPU clock divider
+	 * (the R4600 itself runs full-speed throughout). */
+	cpu_adjust_icount(space->cpu, -128);
+	return rombase[offset];
+}
+
+
+/*************************************
+ *
+ *  Per-game CPU speedups
+ *
+ *  KI and KI2 each ship a calibrated busy-wait loop in their main code: the
+ *  game loads a counter cell from RAM, subtracts it from R26, and compares
+ *  the result against R3, looping until the difference reaches the limit.
+ *  On real hardware the time elapsed during the spin is governed by the
+ *  R4600 instruction rate; under MAME the same wall-clock window is spent
+ *  dispatching thousands of polling reads through the address map.
+ *
+ *  We intercept reads of the polled cell at the specific PC where the
+ *  comparison happens. When we see that the loop still has work left
+ *  (r26 < r3), we know the loop will spin for exactly (r3 - r26) more
+ *  iterations of two instructions each, so we schedule a one-shot wake
+ *  event at that cycle count and yield the CPU via cpu_spinuntil_int().
+ *  end_spin() then issues the matching cpu_triggerint(), which is the
+ *  scheduler wake-up partner of spinuntil_int (not a real hardware IRQ).
+ *
+ *  Hot-loop polled-cell addresses (KSEG0-stripped to physical, since the
+ *  mame2010 address map uses physical addresses):
+ *      KI : virt 0x8808f5bc -> phys 0x0808f5bc
+ *      KI2: virt 0x887ff544 -> phys 0x087ff544
+ *
+ *  PC values are the full virtual KSEG0 addresses as cpu_get_pc() reports
+ *  them on MIPS3 (no high-bit stripping):
+ *      KI : 0x88029890
+ *      KI2: 0x8802c2d0
+ *
+ *************************************/
+
+static TIMER_CALLBACK( end_spin )
+{
+	cpu_triggerint(machine->firstcpu);
+}
+
+
+static READ32_HANDLER( kinst_speedup_r )
+{
+	if (cpu_get_pc(space->cpu) == 0x88029890 ||  /* KI  */
+	    cpu_get_pc(space->cpu) == 0x8802c2d0)    /* KI2 */
+	{
+		uint32_t r3  = cpu_get_reg(space->cpu, MIPS3_R3);
+		uint32_t r26 = cpu_get_reg(space->cpu, MIPS3_R26) - *kinst_speedup;
+		if (r26 < r3)
+		{
+			timer_set(space->machine,
+			          space->machine->firstcpu->cycles_to_attotime((r3 - r26) * 2),
+			          NULL, 0, end_spin);
+			cpu_spinuntil_int(space->cpu);
+		}
+	}
+	return *kinst_speedup;
+}
+
+
 /*************************************
  *
  *  Main CPU memory handlers
@@ -391,7 +482,7 @@ static ADDRESS_MAP_START( main_map, ADDRESS_SPACE_PROGRAM, 32 )
 	AM_RANGE(0x10000080, 0x100000ff) AM_READWRITE(kinst_control_r, kinst_control_w) AM_BASE(&kinst_control)
 	AM_RANGE(0x10000100, 0x1000013f) AM_DEVREADWRITE("ide", kinst_ide_r, kinst_ide_w)
 	AM_RANGE(0x10000170, 0x10000173) AM_DEVREADWRITE("ide", kinst_ide_extra_r, kinst_ide_extra_w)
-	AM_RANGE(0x1fc00000, 0x1fc7ffff) AM_ROM AM_REGION("user1", 0) AM_BASE(&rombase)
+	AM_RANGE(0x1fc00000, 0x1fc7ffff) AM_READ(rom_r)
 ADDRESS_MAP_END
 
 
@@ -875,18 +966,23 @@ ROM_END
 
 static DRIVER_INIT( kinst )
 {
-	static const UINT8 kinst_control_map[8] = { 0,1,2,3,4,5,6,7 };
+	static const uint8_t kinst_control_map[8] = { 0,1,2,3,4,5,6,7 };
 
 	dcs_init(machine);
 
 	/* set up the control register mapping */
 	control_map = kinst_control_map;
+
+	/* install the per-game busy-wait speedup hook on the polled cell */
+	kinst_speedup = memory_install_read32_handler(
+		cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM),
+		0x0808f5bc, 0x0808f5bf, 0, 0, kinst_speedup_r);
 }
 
 
 static DRIVER_INIT( kinst2 )
 {
-	static const UINT8 kinst2_control_map[8] = { 2,4,1,0,3,5,6,7 };
+	static const uint8_t kinst2_control_map[8] = { 2,4,1,0,3,5,6,7 };
 
 	// read: $80 on ki2 = $90 on ki
 	// read: $88 on ki2 = $a0 on ki
@@ -899,6 +995,11 @@ static DRIVER_INIT( kinst2 )
 
 	/* set up the control register mapping */
 	control_map = kinst2_control_map;
+
+	/* install the per-game busy-wait speedup hook on the polled cell */
+	kinst_speedup = memory_install_read32_handler(
+		cputag_get_address_space(machine, "maincpu", ADDRESS_SPACE_PROGRAM),
+		0x087ff544, 0x087ff547, 0, 0, kinst_speedup_r);
 }
 
 

@@ -15,7 +15,6 @@
 #include "streams.h"
 #include "config.h"
 #include "profiler.h"
-#include "sound/wavwrite.h"
 
 
 
@@ -45,17 +44,15 @@ struct _sound_private
 
 	int totalsnd;
 
-	UINT32 finalmix_leftover;
-	INT16 *finalmix;
-	INT32 *leftmix;
-	INT32 *rightmix;
+	uint32_t finalmix_leftover;
+	int16_t *finalmix;
+	int32_t *leftmix;
+	int32_t *rightmix;
 
 	int muted;
 	int attenuation;
 	int enabled;
 	int nosound_mode;
-
-	wav_file *wavfile;
 };
 
 
@@ -114,7 +111,6 @@ INLINE speaker_device *index_to_input(running_machine *machine, int index, int &
 void sound_init(running_machine *machine)
 {
 	sound_private *global;
-	const char *filename;
 
 	machine->sound_data = global = auto_alloc_clear(machine, sound_private);
 
@@ -122,27 +118,90 @@ void sound_init(running_machine *machine)
 	global->nosound_mode = !options_get_bool(machine->options(), OPTION_SOUND);
 	if (global->nosound_mode)
 		machine->sample_rate = 11025;
+	else
+	{
+		/* libretro: when every sound source shares one native rate, run the
+		   whole mixer chain at that rate so the core resamples nowhere; the
+		   frontend then does the single, higher-quality conversion to the
+		   host rate.  Multi-rate machines keep the configured output rate. */
+		int single_rate = stream_single_source_rate(machine);
+		/* only adopt sane audio rates: FM cores (~50-62k), PCM/fixed (44.1k),
+		   ADPCM (low-kHz). Skip oversampled streams like AY/SN (clk/8 ~ 100-
+		   250k) - using those as the output rate only multiplies mixing work. */
+		if (single_rate >= 8000 && single_rate <= 96000)
+		{
+			/* mame2010_sample_rate_mode (set from the core option):
+			 *   0 = FIXED  : honour the user-chosen rate, do not adopt
+			 *   1 = AUTO   : adopt the native rate, snapped to the ladder
+			 *   2 = MANUAL : adopt the exact native rate */
+			extern unsigned mame2010_sample_rate_mode;
+			if (mame2010_sample_rate_mode == 1)
+			{
+				static const int ladder[] =
+					{ 8000, 11025, 22050, 32000, 44100, 48000, 96000 };
+				int best = ladder[0];
+				int bd   = (single_rate > ladder[0]) ?
+					(single_rate - ladder[0]) : (ladder[0] - single_rate);
+				unsigned li;
+				for (li = 1; li < sizeof(ladder) / sizeof(ladder[0]); li++)
+				{
+					int d = (single_rate > ladder[li]) ?
+						(single_rate - ladder[li]) : (ladder[li] - single_rate);
+					if (d < bd) { bd = d; best = ladder[li]; }
+				}
+				machine->sample_rate = best;
+			}
+			else if (mame2010_sample_rate_mode == 2)
+				machine->sample_rate = single_rate;
+			/* mode 0 (FIXED): leave the user-configured rate in place */
+		}
+	}
 
 	/* count the speakers */
 	VPRINTF(("total speakers = %d\n", speaker_output_count(machine->config)));
 
 	/* allocate memory for mix buffers */
-	global->leftmix = auto_alloc_array(machine, INT32, machine->sample_rate);
-	global->rightmix = auto_alloc_array(machine, INT32, machine->sample_rate);
-	global->finalmix = auto_alloc_array(machine, INT16, machine->sample_rate);
+	global->leftmix = auto_alloc_array(machine, int32_t, machine->sample_rate);
+	global->rightmix = auto_alloc_array(machine, int32_t, machine->sample_rate);
+	global->finalmix = auto_alloc_array(machine, int16_t, machine->sample_rate);
 
-	/* allocate a global timer for sound timing */
-	global->update_timer = timer_alloc(machine, sound_update, NULL);
-	timer_adjust_periodic(global->update_timer, STREAMS_UPDATE_ATTOTIME, 0, STREAMS_UPDATE_ATTOTIME);
+	/* allocate a global timer for sound timing. The default 50 Hz cadence
+	 * (STREAMS_UPDATE_ATTOTIME) is decoupled from the screen refresh,
+	 * which for a typical 60 Hz arcade game produces a 5:6 beat -- the
+	 * mixer tick fires inside five out of every six retro_run windows
+	 * and skips the sixth, repeating every 100 ms. Each firing carries a
+	 * ~960-sample audio batch and the work to mix it; the empty frame
+	 * doesn't. The frontend's frame-time metric sees that pattern as a
+	 * periodic spike with a zero between spikes.
+	 *
+	 * Driving the periodic timer off the primary screen's frame_period
+	 * instead lines the mixer ticks up with the video frames -- exactly
+	 * one tick per frame, irrespective of whether the game runs 60.0,
+	 * 60.06, 59.94, 53.6 or 50 Hz. Each retro_run then carries the same
+	 * audio mix load, batches arrive at a steady N-samples-per-call
+	 * cadence the frontend's resampler is happy with, and the beat
+	 * disappears.
+	 *
+	 * Screenless machines (where machine->primary_screen is NULL) keep
+	 * the historical 50 Hz cadence as a defensive fallback; they have
+	 * no visible jitter to clean up anyway. */
+	{
+		attotime sound_update_period = STREAMS_UPDATE_ATTOTIME;
+		if (machine->primary_screen != NULL)
+			sound_update_period = machine->primary_screen->frame_period();
+
+		global->update_timer = timer_alloc(machine, sound_update, NULL);
+		timer_adjust_periodic(global->update_timer, sound_update_period, 0, sound_update_period);
+	}
 
 	/* finally, do all the routing */
 	VPRINTF(("route_sound\n"));
 	route_sound(machine);
 
-	/* open the output WAV file if specified */
-	filename = options_get_string(machine->options(), OPTION_WAVWRITE);
-	if (filename[0] != 0)
-		global->wavfile = wav_open(filename, machine->sample_rate, 2);
+	/* libretro: speaker mixers (and any filters) were created at the default
+	   rate during device start; align them to the final output rate so a
+	   single-rate machine resamples nowhere inside the core */
+	stream_set_consumer_rates(machine, machine->sample_rate);
 
 	/* enable sound by default */
 	global->enabled = TRUE;
@@ -165,11 +224,6 @@ void sound_init(running_machine *machine)
 static void sound_exit(running_machine &machine)
 {
 	sound_private *global = machine.sound_data;
-
-	/* close any open WAV file */
-	if (global->wavfile != NULL)
-		wav_close(global->wavfile);
-	global->wavfile = NULL;
 
 	/* reset variables */
 	global->totalsnd = 0;
@@ -395,13 +449,13 @@ static void sound_save(running_machine *machine, int config_type, xml_data_node 
 
 static TIMER_CALLBACK( sound_update )
 {
-   UINT32 finalmix_step, finalmix_offset = 0;
+   uint32_t finalmix_step, finalmix_offset = 0;
    int samples_this_update = 0;
    int sample;
    sound_private *global = machine->sound_data;
-   INT32 *leftmix = global->leftmix;
-   INT32 *rightmix = global->rightmix;
-   INT16 *finalmix = global->finalmix;
+   int32_t *leftmix = global->leftmix;
+   int32_t *rightmix = global->rightmix;
+   int16_t *finalmix = global->finalmix;
 
    /* force all the speaker streams to generate the proper number of samples */
    for (speaker_device *speaker = speaker_first(*machine); speaker != NULL; speaker = speaker_next(speaker))
@@ -415,7 +469,7 @@ static TIMER_CALLBACK( sound_update )
       int sampindex = sample / 100;
 
       /* clamp the left side */
-      INT32 samp = leftmix[sampindex];
+      int32_t samp = leftmix[sampindex];
       if (samp < -32768)
          samp = -32768;
       else if (samp > 32767)
@@ -434,12 +488,7 @@ static TIMER_CALLBACK( sound_update )
 
    /* play the result */
    if (finalmix_offset > 0)
-   {
       osd_update_audio_stream(machine, finalmix, finalmix_offset / 2);
-      video_avi_add_sound(machine, finalmix, finalmix_offset / 2);
-      if (global->wavfile != NULL)
-         wav_add_data_16(global->wavfile, finalmix, finalmix_offset);
-   }
 
    /* update the streamer */
    streams_update(machine);
@@ -455,7 +504,7 @@ static TIMER_CALLBACK( sound_update )
 //  speaker_device_config - constructor
 //-------------------------------------------------
 
-speaker_device_config::speaker_device_config(const machine_config &mconfig, const char *tag, const device_config *owner, UINT32 clock)
+speaker_device_config::speaker_device_config(const machine_config &mconfig, const char *tag, const device_config *owner, uint32_t clock)
 	: device_config(mconfig, static_alloc_device_config, "Speaker", tag, owner, clock),
 	  m_x(0.0),
 	  m_y(0.0),
@@ -469,7 +518,7 @@ speaker_device_config::speaker_device_config(const machine_config &mconfig, cons
 //  configuration object
 //-------------------------------------------------
 
-device_config *speaker_device_config::static_alloc_device_config(const machine_config &mconfig, const char *tag, const device_config *owner, UINT32 clock)
+device_config *speaker_device_config::static_alloc_device_config(const machine_config &mconfig, const char *tag, const device_config *owner, uint32_t clock)
 {
 	return global_alloc(speaker_device_config(mconfig, tag, owner, clock));
 }
@@ -494,9 +543,9 @@ device_t *speaker_device_config::alloc_device(running_machine &machine) const
 void speaker_device_config::device_config_complete()
 {
 	// move inline data into its final home
-	m_x = static_cast<double>(static_cast<INT32>(m_inline_data[INLINE_X])) / (double)(1 << 24);
-	m_y = static_cast<double>(static_cast<INT32>(m_inline_data[INLINE_Y])) / (double)(1 << 24);
-	m_z = static_cast<double>(static_cast<INT32>(m_inline_data[INLINE_Z])) / (double)(1 << 24);
+	m_x = static_cast<double>(static_cast<int32_t>(m_inline_data[INLINE_X])) / (double)(1 << 24);
+	m_y = static_cast<double>(static_cast<int32_t>(m_inline_data[INLINE_Y])) / (double)(1 << 24);
+	m_z = static_cast<double>(static_cast<int32_t>(m_inline_data[INLINE_Z])) / (double)(1 << 24);
 }
 
 
@@ -644,7 +693,7 @@ void speaker_device::mixer_update(stream_sample_t **inputs, stream_sample_t **ou
 	// loop over samples
 	for (pos = 0; pos < samples; pos++)
 	{
-		INT32 sample = inputs[0][pos];
+		int32_t sample = inputs[0][pos];
 		int inp;
 
 		// add up all the inputs
@@ -659,7 +708,7 @@ void speaker_device::mixer_update(stream_sample_t **inputs, stream_sample_t **ou
 //  mix - mix in samples from the speaker's stream
 //-------------------------------------------------
 
-void speaker_device::mix(INT32 *leftmix, INT32 *rightmix, int &samples_this_update, bool suppress)
+void speaker_device::mix(int32_t *leftmix, int32_t *rightmix, int &samples_this_update, bool suppress)
 {
 	// skip if no stream
 	if (m_mixer_stream == NULL)

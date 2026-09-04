@@ -302,6 +302,14 @@ void running_machine::start()
 	/* initialize the streams engine before the sound devices start */
 	streams_init(this);
 
+	/* The machine RNG (mame_rand) is a fixed-seed LCG, so it is
+	   deterministic from boot -- but its running seed must travel in the
+	   save state too.  Otherwise a save/load (and therefore rewind,
+	   run-ahead and netplay, which save and restore state continuously)
+	   resumes the sequence from a different point than an uninterrupted
+	   run would, desynchronising any driver that reads mame_rand. */
+	state_save_register_global(this, m_rand_seed);
+
 	/* first load ROMs, then populate memory, and finally initialize CPUs
 	   these operations must proceed in this order */
 	rom_init(this);
@@ -365,8 +373,6 @@ void running_machine::start()
 
 int running_machine::run(bool firstrun)
 {
-   int error = MAMERR_NONE;
-
    /* move to the init phase */
    m_current_phase = MACHINE_PHASE_INIT;
 
@@ -409,13 +415,46 @@ void running_machine::retro_machineexit()
 
 }
 
-extern int RLOOP;
 extern int ENDEXEC;
 
 void running_machine::retro_loop()
 {
-   while (RLOOP==1)
+   /* Pump emulation forward until the OSD video update path signals that
+    * a full frame has been rendered into the libretro framebuffer. See the
+    * commentary above retro_frame_drawn() in retromain.h for the
+    * audio/video framing contract. */
+   while (!retro_frame_drawn())
    {
+      /* Honour a scheduled exit (content close: the OSD sets pauseg = -1
+       * and osd_update() calls schedule_exit(), which sets m_exit_pending
+       * and returns without marking the frame drawn).  In upstream MAME
+       * the run() while-loop consumed m_exit_pending; in this port that
+       * loop is vestigial and this per-frame loop is the scheduler pump,
+       * so the flag must be consumed HERE.  Without this check the loop
+       * can never terminate once an exit is scheduled -- the frame-drawn
+       * flag is never set again and m_exit_pending is never read -- and
+       * retro_run() simply never returns: the frontend freezes forever on
+       * Close Content, with the emulated game still running inside the
+       * stuck call.  Wind the machine down through the same exit phase
+       * schedule_hard_reset() uses, flag ENDEXEC so retro_main_loop()
+       * frees the machine and config, and return. */
+      if (m_exit_pending && m_saveload_schedule == SLS_NONE)
+      {
+         /* and out via the exit phase */
+         m_current_phase = MACHINE_PHASE_EXIT;
+
+         /* save the NVRAM and configuration */
+         sound_mute(this, true);
+         nvram_save(this);
+         config_save_settings(this);
+
+         /* call all exit callbacks registered */
+         call_notifiers(MACHINE_NOTIFY_EXIT);
+
+         ENDEXEC = 1;
+         return;
+      }
+
       /* execute CPUs if not paused */
       if (!m_paused)
          m_scheduler.timeslice();
@@ -558,7 +597,7 @@ void running_machine::resume()
   region_alloc - allocates memory for a region
 -------------------------------------------------*/
 
-region_info *running_machine::region_alloc(const char *name, UINT32 length, UINT32 flags)
+region_info *running_machine::region_alloc(const char *name, uint32_t length, uint32_t flags)
 {
     /* make sure we don't have a region of the same name; also find the end of the list */
     region_info *info = m_regionlist.find(name);
@@ -668,7 +707,7 @@ void running_machine::current_datetime(system_time &systime)
   rand - standardized random numbers
 -------------------------------------------------*/
 
-UINT32 running_machine::rand()
+uint32_t running_machine::rand()
 {
 	m_rand_seed = 1664525 * m_rand_seed + 1013904223;
 
@@ -697,7 +736,7 @@ void running_machine::call_notifiers(machine_notification which)
 
 void running_machine::handle_saveload()
 {
-	UINT32 openflags = (m_saveload_schedule == SLS_LOAD) ? OPEN_FLAG_READ : (OPEN_FLAG_WRITE | OPEN_FLAG_CREATE | OPEN_FLAG_CREATE_PATHS);
+	uint32_t openflags = (m_saveload_schedule == SLS_LOAD) ? OPEN_FLAG_READ : (OPEN_FLAG_WRITE | OPEN_FLAG_CREATE | OPEN_FLAG_CREATE_PATHS);
 	const char *opnamed = (m_saveload_schedule == SLS_LOAD) ? "loaded" : "saved";
 	const char *opname = (m_saveload_schedule == SLS_LOAD) ? "load" : "save";
 	file_error filerr = FILERR_NONE;
@@ -829,14 +868,14 @@ void running_machine::logfile_callback(running_machine &machine, const char *buf
   region_info - constructor
 -------------------------------------------------*/
 
-region_info::region_info(running_machine &machine, const char *name, UINT32 length, UINT32 flags)
+region_info::region_info(running_machine &machine, const char *name, uint32_t length, uint32_t flags)
 	: m_machine(machine),
 	  m_next(NULL),
 	  m_name(name),
 	  m_length(length),
 	  m_flags(flags)
 {
-	m_base.u8 = auto_alloc_array(&machine, UINT8, length);
+	m_base.u8 = auto_alloc_array(&machine, uint8_t, length);
 }
 
 

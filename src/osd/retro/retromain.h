@@ -13,13 +13,13 @@ retromain.h
 #include "osdepend.h"
 #include "libretro.h"
 
-#if !defined(HAVE_OPENGL) && !defined(HAVE_OPENGLES) && !defined(HAVE_RGB32)
+#if !defined(HAVE_RGB32)
    #define M16B
 #endif
 
 #ifdef M16B
    #define FUNC_PREFIX(x) rgb565_##x
-   #define PIXEL_TYPE UINT16
+   #define PIXEL_TYPE uint16_t
    #define SRCSHIFT_R 3
    #define SRCSHIFT_G 2
    #define SRCSHIFT_B 3
@@ -28,7 +28,7 @@ retromain.h
    #define DSTSHIFT_B 0
 #else
    #define FUNC_PREFIX(x) rgb888_##x
-   #define PIXEL_TYPE UINT32
+   #define PIXEL_TYPE uint32_t
    #define SRCSHIFT_R 0
    #define SRCSHIFT_G 0
    #define SRCSHIFT_B 0
@@ -42,20 +42,34 @@ void osd_update(running_machine* machine,int skip_redraw);
 void osd_update_audio_stream(running_machine* machine,short *buffer, int samples_this_frame);
 void osd_exit(running_machine &machine);
 
-void retro_poll_mame_input();
 void retro_init (void);
 void prep_retro_rotation(int rot);
 void init_input_descriptors(void);
 
-extern void retro_finish();
-extern void retro_main_loop();
+extern void retro_finish(void);
+extern void retro_main_loop(void);
 
 extern int osd_num_processors;
 
 // use if you want to print something with the verbose flag
 void CLIB_DECL mame_printf_verbose(const char *text, ...) ATTR_PRINTF(1,2);
 
-extern int RLOOP;
+/* libretro frame-ready signalling.
+ *
+ * The OSD video update path calls retro_signal_frame_drawn() once it has
+ * pushed a render primitive list into the frontend's pixel buffer. The
+ * per-frame inner scheduler loop (running_machine::retro_loop) polls
+ * retro_frame_drawn() and exits as soon as the flag is set, so each call
+ * to retro_run pumps exactly one video frame's worth of emulation through
+ * MAME's scheduler. The flag is then cleared by retro_clear_frame_drawn()
+ * from retro_run before returning, in preparation for the next call.
+ *
+ * Audio is independent of this flag: MAME's streams subsystem keeps
+ * producing samples as the scheduler advances, and osd_update_audio_stream
+ * forwards them to the frontend via audio_batch_cb as they appear. */
+extern bool retro_frame_drawn(void);
+extern void retro_signal_frame_drawn(void);
+extern void retro_clear_frame_drawn(void);
 
 extern const char* core_name;
 
@@ -91,9 +105,7 @@ struct kt_table
 // fake a keyboard mapped to retro joypad 
 enum
 {
-	KEY_TAB,
 	KEY_F3,
-	KEY_F2,
 	KEY_START,
 	KEY_COIN,
 	KEY_BUTTON_1,
@@ -102,12 +114,62 @@ enum
 	KEY_BUTTON_4,
 	KEY_BUTTON_5,
 	KEY_BUTTON_6, 
-	KEY_BUTTON_7,     
+	KEY_BUTTON_7,
+	KEY_BUTTON_8,
+	KEY_BUTTON_9,
 	KEY_JOYSTICK_U,
 	KEY_JOYSTICK_D,
 	KEY_JOYSTICK_L,
 	KEY_JOYSTICK_R,
+	LX,
+	LY,
+	RX,
+	RY,
 	KEY_TOTAL
+};
+
+enum
+{
+   RETROPAD_B,
+   RETROPAD_Y,
+   RETROPAD_SELECT,
+   RETROPAD_START,
+   RETROPAD_PAD_UP,
+   RETROPAD_PAD_DOWN,
+   RETROPAD_PAD_LEFT,
+   RETROPAD_PAD_RIGHT,
+   RETROPAD_A,
+   RETROPAD_X,
+   RETROPAD_L,
+   RETROPAD_R,
+   RETROPAD_L2,
+   RETROPAD_R2,
+   RETROPAD_L3,
+   RETROPAD_R3,
+   RETROPAD_TOTAL
+};
+
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
+static const char *Buttons_Name[16]=
+{
+   "B",		//0
+   "Y",		//1
+   "SELECT",	//2
+   "START",	//3
+   "Pad UP",	//4
+   "Pad DOWN",	//5
+   "Pad LEFT",	//6
+   "Pad RIGHT",	//7
+   "A",		//8
+   "X",		//9
+   "L",		//10
+   "R",		//11
+   "L2",		//12
+   "R2",		//13
+   "L3",		//14
+   "R3",		//15
 };
 
 const kt_table ktable[] = {
